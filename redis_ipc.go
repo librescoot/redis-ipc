@@ -131,8 +131,27 @@ func (c *Client) HandleRequests(name string, handler func([]byte) error) *Reques
 		handler: handler,
 	}
 	c.reqHandlers.Store(name, rh)
-	go rh.processLoop()
+	go rh.processLoopWithRestart()
 	return rh
+}
+
+func (rh *RequestHandler) processLoopWithRestart() {
+	for {
+		if rh.client.ctx.Err() != nil {
+			log.Printf("Request handler for '%s' shutting down due to client context cancellation", rh.name)
+			return
+		}
+
+		log.Printf("Starting request handler loop for '%s'", rh.name)
+		rh.processLoop()
+
+		if rh.client.ctx.Err() != nil {
+			return
+		}
+
+		log.Printf("Request handler loop for '%s' exited, restarting in 5 seconds...", rh.name)
+		time.Sleep(5 * time.Second)
+	}
 }
 
 func (rh *RequestHandler) processLoop() {
@@ -142,16 +161,12 @@ func (rh *RequestHandler) processLoop() {
 			continue
 		}
 		if err != nil {
-			if rh.client.ctx.Err() != nil {
-				return
-			}
-			log.Printf("BRPOP error: %v", err)
-			time.Sleep(time.Second)
-			continue
+			log.Printf("BRPOP error for '%s': %v", rh.name, err)
+			return
 		}
 
 		if err := rh.handler([]byte(result[1])); err != nil {
-			log.Printf("Handler error: %v", err)
+			log.Printf("Handler error for '%s': %v", rh.name, err)
 		}
 	}
 }
