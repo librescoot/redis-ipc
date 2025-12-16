@@ -1,84 +1,231 @@
-# Rescoot Redis IPC Library
+# LibreScoot Redis IPC Library
 
-Redis-based IPC library implementing pub/sub messaging, queue processing, and atomic transactions.
-This is a clean-room reimplementation of the IPC functionality from unu's usk library.
+Redis-based IPC library for Go with type-safe generics, functional options, and LibreScoot-specific patterns for hash-based state management.
 
-## Core Architecture
+## Features
 
-Single-client Redis multiplexer handling four IPC patterns:
-
-1. **Pub/Sub Messaging**: Topic-based message distribution via Redis PUBLISH/SUBSCRIBE
-2. **Request Processing**: Blocking queue consumers using BRPOP/LPUSH
-3. **Atomic Transactions**: Pipelined command groups with MULTI/EXEC semantics
-4. **Direct Command Execution**: Immediate execution of Redis commands with results
-
-## Usage Example
-
-```go
-// Initialize with connection params
-client := redis_ipc.New(redis_ipc.Config{
-    Address: "localhost",
-    Port:    6379,
-})
-
-// Subscribe to messages
-sg := client.Subscribe("group")
-sg.Handle("channel", func(msg []byte) error {
-    log.Printf("Received: %s", msg)
-    return nil
-})
-
-// Process queue items
-client.HandleRequests("queue", func(data []byte) error {
-    log.Printf("Processing: %s", data)
-    return nil
-})
-
-// Direct command execution
-value, err := client.Get("mykey")
-if err != nil {
-    log.Printf("Error: %v", err)
-}
-log.Printf("Value: %s", value)
-
-// Using convenience methods
-err = client.Set("mykey", "newvalue", 0)
-count, err := client.Incr("counter")
-hashValue, err := client.HGet("myhash", "field")
-
-// Execute atomic transactions with results
-txg := client.NewTxGroup("tx")
-txg.Add("SET", "key", "value")
-txg.Add("GET", "key")
-txg.Add("INCR", "counter")
-
-results, err := txg.Exec()
-if err != nil {
-    log.Printf("Transaction failed: %v", err)
-}
-log.Printf("SET result: %v", results[0])
-log.Printf("GET result: %v", results[1])
-log.Printf("INCR result: %v", results[2])
-```
-
-## Concurrency Model
-
-- Multiplexed Redis connections (single pool)
-- Message routing via concurrent maps
-- Lock-free handler dispatch
-- Thread-safe transaction pipelining
-
-## Dependencies
-
-- Redis server
-- go-redis
+- **Generics**: Type-safe subscriptions and queue handlers
+- **Functional Options**: Flexible client configuration
+- **Connection Callbacks**: React to connect/disconnect events
+- **Context Propagation**: All operations accept `context.Context`
+- **Graceful Shutdown**: Wait for handlers to complete
+- **Hash State Pattern**: Atomic HSET + PUBLISH with change detection
+- **Fault Set Management**: Redis SET with pub/sub notifications
 
 ## Installation
 
 ```bash
-go get github.com/rescoot/redis-ipc
+go get github.com/librescoot/redis-ipc
+```
+
+## Quick Start
+
+```go
+import ipc "github.com/librescoot/redis-ipc"
+
+// Create client with options
+client, err := ipc.New(
+    ipc.WithAddress("localhost"),
+    ipc.WithPort(6379),
+    ipc.WithOnConnect(func() { log.Println("connected") }),
+    ipc.WithOnDisconnect(func(err error) { log.Println("disconnected") }),
+)
+if err != nil {
+    log.Fatal(err)
+}
+defer client.Close()
+```
+
+## Typed Subscriptions
+
+```go
+type VehicleState struct {
+    State   string `json:"state"`
+    Speed   int    `json:"speed"`
+}
+
+// Subscribe with automatic JSON decoding
+sub, err := ipc.Subscribe(client, "vehicle:events", func(msg VehicleState) error {
+    log.Printf("State: %s, Speed: %d", msg.State, msg.Speed)
+    return nil
+})
+defer sub.Unsubscribe()
+
+// Publish typed messages
+ctx := context.Background()
+ipc.PublishTyped(client, ctx, "vehicle:events", VehicleState{State: "ready", Speed: 0})
+```
+
+## Queue Processing
+
+```go
+type Command struct {
+    Action string `json:"action"`
+}
+
+// Handle queue items with automatic restart on errors
+handler := ipc.HandleRequests(client, "scooter:commands", func(cmd Command) error {
+    log.Printf("Command: %s", cmd.Action)
+    return nil
+})
+defer handler.Stop()
+
+// Send to queue
+ipc.SendRequest(client, ctx, "scooter:commands", Command{Action: "unlock"})
+```
+
+## LibreScoot Hash Pattern
+
+The LibreScoot pattern stores state in Redis hashes and notifies via pub/sub:
+- Publisher: `HSET vehicle state "ready"` → `PUBLISH vehicle "state"`
+- Consumer: `SUBSCRIBE vehicle` → receives `"state"` → `HGET vehicle state`
+
+### HashPublisher
+
+```go
+// Create publisher for "vehicle" hash (publishes to "vehicle" channel)
+vehicle := client.NewHashPublisher("vehicle")
+
+// Set field and publish atomically
+vehicle.Set(ctx, "state", "ready")
+
+// Only publish if value changed
+changed, _ := vehicle.SetIfChanged(ctx, "state", "ready")
+
+// Batch updates with selective publishing
+vehicle.SetManyIfChanged(ctx, map[string]any{
+    "state":      "parked",
+    "kickstand":  "down",
+    "brake:left": "off",
+})
+
+// Set with automatic timestamp field
+vehicle.SetWithTimestamp(ctx, "state", "ready")
+// Sets both "state" and "state:timestamp"
+```
+
+### HashWatcher
+
+```go
+// Create watcher for "battery:0" hash
+watcher := client.NewHashWatcher("battery:0")
+
+// Register field-specific handlers
+watcher.OnField("state", func(value string) error {
+    log.Printf("Battery state: %s", value)
+    return nil
+})
+
+watcher.OnField("charge", func(value string) error {
+    log.Printf("Battery charge: %s%%", value)
+    return nil
+})
+
+// Catch-all for unhandled fields
+watcher.OnAny(func(field, value string) error {
+    log.Printf("%s = %s", field, value)
+    return nil
+})
+
+// Start watching
+watcher.Start()
+defer watcher.Stop()
+
+// Fetch initial state
+all, _ := watcher.FetchAll(ctx)
+```
+
+### FaultSet
+
+```go
+// Manage fault codes in a Redis SET with pub/sub notification
+faults := client.NewFaultSet("battery:0:fault", "battery:0", "fault")
+
+faults.Add(ctx, 35)     // SADD + PUBLISH
+faults.Remove(ctx, 35)  // SREM + PUBLISH
+faults.Has(ctx, 35)     // SISMEMBER
+faults.All(ctx)         // SMEMBERS
+```
+
+## Transactions
+
+```go
+tx := client.NewTxGroup()
+tx.Add("HSET", "vehicle", "state", "ready").
+   Add("HSET", "vehicle", "state:timestamp", time.Now().Unix()).
+   Add("PUBLISH", "vehicle", "state")
+
+results, err := tx.Exec(ctx)
+```
+
+## Message Router
+
+For JSON envelope-based routing (`{"type": "...", "data": {...}}`):
+
+```go
+router := client.NewRouter("events")
+
+ipc.Handle(router, "state", func(s StateMsg) error { ... })
+ipc.Handle(router, "error", func(e ErrorMsg) error { ... })
+
+router.Start()
+defer router.Stop()
+
+// Publish routed messages
+ipc.PublishRouted(client, ctx, "events", "state", StateMsg{...})
+```
+
+## Configuration Options
+
+```go
+client, err := ipc.New(
+    ipc.WithAddress("localhost"),
+    ipc.WithPort(6379),
+    ipc.WithRetryInterval(5 * time.Second),
+    ipc.WithMaxRetries(3),
+    ipc.WithPoolSize(3),
+    ipc.WithDialTimeout(2 * time.Second),
+    ipc.WithLogger(slog.Default()),
+    ipc.WithCodec(ipc.JSONCodec{}),  // or ipc.StringCodec{}
+    ipc.WithOnConnect(func() { ... }),
+    ipc.WithOnDisconnect(func(err error) { ... }),
+)
+```
+
+## Direct Redis Operations
+
+All operations accept `context.Context`:
+
+```go
+// Strings
+client.Get(ctx, "key")
+client.Set(ctx, "key", "value", 0)
+client.Incr(ctx, "counter")
+
+// Hashes
+client.HGet(ctx, "hash", "field")
+client.HSet(ctx, "hash", "field", "value")
+client.HGetAll(ctx, "hash")
+
+// Lists
+client.LPush(ctx, "queue", "value")
+client.BRPop(ctx, time.Second, "queue")
+
+// Pub/Sub
+client.Publish(ctx, "channel", "message")
+
+// Keys
+client.Exists(ctx, "key")
+client.Del(ctx, "key")
+client.Expire(ctx, "key", time.Hour)
+
+// Raw command
+client.Do(ctx, "PING")
+
+// Access underlying go-redis client
+client.Raw().Scan(ctx, ...)
 ```
 
 ## License
 
-AGPL-3.0, see LICENSE for details
+AGPL-3.0, see LICENSE for details.

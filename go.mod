@@ -1,4 +1,4 @@
-module github.com/rescoot/redis-ipc
+module github.com/librescoot/redis-ipc
 
 go 1.22.1
 
