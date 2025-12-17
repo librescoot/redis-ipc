@@ -397,3 +397,146 @@ func TestHashPublisherSetWithTimestamp(t *testing.T) {
 	// Cleanup
 	client.Del(ctx, hash)
 }
+
+func TestHashWatcherStartWithSync(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	hash := "test:hashsync:" + time.Now().Format(time.RFC3339Nano)
+
+	// Pre-populate the hash with initial values
+	pub := client.NewHashPublisher(hash)
+	err = pub.SetMany(ctx, map[string]any{
+		"state":  "ready",
+		"charge": "85",
+	})
+	if err != nil {
+		t.Fatalf("SetMany() failed: %v", err)
+	}
+
+	// Set up watcher with handlers
+	stateReceived := make(chan string, 2)
+	chargeReceived := make(chan string, 2)
+
+	watcher := client.NewHashWatcher(hash)
+	watcher.OnField("state", func(value string) error {
+		stateReceived <- value
+		return nil
+	})
+	watcher.OnField("charge", func(value string) error {
+		chargeReceived <- value
+		return nil
+	})
+
+	// StartWithSync should call handlers with initial values
+	err = watcher.StartWithSync(ctx)
+	if err != nil {
+		t.Fatalf("StartWithSync() failed: %v", err)
+	}
+	defer watcher.Stop()
+
+	// Should receive initial values
+	select {
+	case val := <-stateReceived:
+		if val != "ready" {
+			t.Errorf("Initial state = %q, want ready", val)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Timeout waiting for initial state")
+	}
+
+	select {
+	case val := <-chargeReceived:
+		if val != "85" {
+			t.Errorf("Initial charge = %q, want 85", val)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Timeout waiting for initial charge")
+	}
+
+	// Now publish a new value and verify we receive updates too
+	err = pub.Set(ctx, "state", "parked")
+	if err != nil {
+		t.Fatalf("Set() failed: %v", err)
+	}
+
+	select {
+	case val := <-stateReceived:
+		if val != "parked" {
+			t.Errorf("Updated state = %q, want parked", val)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Timeout waiting for updated state")
+	}
+
+	// Cleanup
+	client.Del(ctx, hash)
+}
+
+func TestHashWatcherDebounce(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	hash := "test:hashdebounce:" + time.Now().Format(time.RFC3339Nano)
+
+	// Track all values received
+	received := make(chan string, 10)
+
+	watcher := client.NewHashWatcher(hash)
+	watcher.SetDebounce(200 * time.Millisecond)
+	watcher.OnField("state", func(value string) error {
+		received <- value
+		return nil
+	})
+
+	err = watcher.Start()
+	if err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer watcher.Stop()
+
+	// Give watcher time to subscribe
+	time.Sleep(100 * time.Millisecond)
+
+	// Publish rapid updates
+	pub := client.NewHashPublisher(hash)
+	for _, state := range []string{"a", "b", "c", "d", "e"} {
+		err = pub.Set(ctx, "state", state)
+		if err != nil {
+			t.Fatalf("Set() failed: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond) // Faster than debounce
+	}
+
+	// Wait for debounce to fire
+	time.Sleep(300 * time.Millisecond)
+
+	// Should only receive the last value due to debouncing
+	select {
+	case val := <-received:
+		if val != "e" {
+			t.Errorf("Debounced value = %q, want e", val)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Timeout waiting for debounced value")
+	}
+
+	// Should not receive any more values
+	select {
+	case val := <-received:
+		t.Errorf("Unexpected extra value received: %q", val)
+	case <-time.After(100 * time.Millisecond):
+		// Expected - no more values
+	}
+
+	// Cleanup
+	client.Del(ctx, hash)
+}

@@ -219,27 +219,45 @@ type HashWatcher struct {
 	catchAll func(field, value string) error
 	mu       sync.RWMutex
 	pubsub   *redis.PubSub
+
+	// Debounce support
+	debounce       time.Duration
+	debounceTimers map[string]*time.Timer
+	debounceValues map[string]string
+	debounceMu     sync.Mutex
 }
 
 // NewHashWatcher creates a watcher for a hash.
 // By convention, the channel name equals the hash name.
 func (c *Client) NewHashWatcher(hash string) *HashWatcher {
 	return &HashWatcher{
-		client:   c,
-		hash:     hash,
-		channel:  hash,
-		handlers: make(map[string]func(value string) error),
+		client:         c,
+		hash:           hash,
+		channel:        hash,
+		handlers:       make(map[string]func(value string) error),
+		debounceTimers: make(map[string]*time.Timer),
+		debounceValues: make(map[string]string),
 	}
 }
 
 // NewHashWatcherWithChannel creates a watcher with a custom channel name.
 func (c *Client) NewHashWatcherWithChannel(hash, channel string) *HashWatcher {
 	return &HashWatcher{
-		client:   c,
-		hash:     hash,
-		channel:  channel,
-		handlers: make(map[string]func(value string) error),
+		client:         c,
+		hash:           hash,
+		channel:        channel,
+		handlers:       make(map[string]func(value string) error),
+		debounceTimers: make(map[string]*time.Timer),
+		debounceValues: make(map[string]string),
 	}
+}
+
+// SetDebounce sets a debounce duration for handler calls.
+// When set, rapid updates to the same field are coalesced - only the last
+// value is passed to the handler after the quiet period expires.
+func (hw *HashWatcher) SetDebounce(d time.Duration) *HashWatcher {
+	hw.debounce = d
+	return hw
 }
 
 // OnField registers a handler for a specific field.
@@ -292,31 +310,7 @@ func (hw *HashWatcher) Start() error {
 		close(subscribed)
 
 		for msg := range ch {
-			field := msg.Payload
-
-			// Fetch the value from hash
-			value, err := hw.client.redis.HGet(hw.client.ctx, hw.hash, field).Result()
-			if err != nil {
-				if err != redis.Nil {
-					hw.client.opts.logger.Error("HGET error", "hash", hw.hash, "field", field, "error", err)
-				}
-				continue
-			}
-
-			hw.mu.RLock()
-			handler, ok := hw.handlers[field]
-			catchAll := hw.catchAll
-			hw.mu.RUnlock()
-
-			if ok {
-				if err := handler(value); err != nil {
-					hw.client.opts.logger.Error("handler error", "hash", hw.hash, "field", field, "error", err)
-				}
-			} else if catchAll != nil {
-				if err := catchAll(field, value); err != nil {
-					hw.client.opts.logger.Error("catch-all handler error", "hash", hw.hash, "field", field, "error", err)
-				}
-			}
+			hw.processField(msg.Payload)
 		}
 	}()
 
@@ -325,6 +319,120 @@ func (hw *HashWatcher) Start() error {
 		return nil
 	case <-time.After(5 * time.Second):
 		return fmt.Errorf("subscription timeout for channel %s", hw.channel)
+	}
+}
+
+// StartWithSync subscribes, fetches current state, calls handlers, then processes messages.
+// This ensures no messages are missed between initial fetch and subscribe.
+// Order: Subscribe (messages buffer) → HGETALL → call handlers → process buffered messages
+func (hw *HashWatcher) StartWithSync(ctx context.Context) error {
+	// Subscribe first - messages will buffer in the channel
+	hw.pubsub = hw.client.redis.Subscribe(hw.client.ctx, hw.channel)
+
+	subscribed := make(chan struct{})
+	hw.client.wg.Add(1)
+	go func() {
+		defer hw.client.wg.Done()
+		ch := hw.pubsub.Channel()
+		close(subscribed)
+
+		// Process messages (including any buffered during initial sync)
+		for msg := range ch {
+			hw.processField(msg.Payload)
+		}
+	}()
+
+	// Wait for subscription to be ready
+	select {
+	case <-subscribed:
+	case <-time.After(5 * time.Second):
+		return fmt.Errorf("subscription timeout for channel %s", hw.channel)
+	}
+
+	// Fetch current state and call handlers
+	values, err := hw.client.redis.HGetAll(ctx, hw.hash).Result()
+	if err != nil && err != redis.Nil {
+		return fmt.Errorf("initial fetch failed: %w", err)
+	}
+
+	hw.mu.RLock()
+	handlers := hw.handlers
+	catchAll := hw.catchAll
+	hw.mu.RUnlock()
+
+	for field, value := range values {
+		if handler, ok := handlers[field]; ok {
+			if err := handler(value); err != nil {
+				hw.client.opts.logger.Error("initial sync handler error", "hash", hw.hash, "field", field, "error", err)
+			}
+		} else if catchAll != nil {
+			if err := catchAll(field, value); err != nil {
+				hw.client.opts.logger.Error("initial sync catch-all error", "hash", hw.hash, "field", field, "error", err)
+			}
+		}
+	}
+
+	return nil
+}
+
+// processField fetches and dispatches a field update, with optional debouncing.
+func (hw *HashWatcher) processField(field string) {
+	// Fetch the value from hash
+	value, err := hw.client.redis.HGet(hw.client.ctx, hw.hash, field).Result()
+	if err != nil {
+		if err != redis.Nil {
+			hw.client.opts.logger.Error("HGET error", "hash", hw.hash, "field", field, "error", err)
+		}
+		return
+	}
+
+	if hw.debounce > 0 {
+		hw.processFieldDebounced(field, value)
+	} else {
+		hw.dispatchField(field, value)
+	}
+}
+
+// processFieldDebounced handles debounced field updates.
+func (hw *HashWatcher) processFieldDebounced(field, value string) {
+	hw.debounceMu.Lock()
+	defer hw.debounceMu.Unlock()
+
+	// Store the latest value
+	hw.debounceValues[field] = value
+
+	// Cancel existing timer if any
+	if timer, ok := hw.debounceTimers[field]; ok {
+		timer.Stop()
+	}
+
+	// Create new timer
+	hw.debounceTimers[field] = time.AfterFunc(hw.debounce, func() {
+		hw.debounceMu.Lock()
+		v := hw.debounceValues[field]
+		delete(hw.debounceTimers, field)
+		delete(hw.debounceValues, field)
+		hw.debounceMu.Unlock()
+
+		hw.dispatchField(field, v)
+	})
+}
+
+// dispatchField calls the appropriate handler for a field.
+func (hw *HashWatcher) dispatchField(field, value string) {
+	hw.mu.RLock()
+	handler, ok := hw.handlers[field]
+	catchAll := hw.catchAll
+	hw.mu.RUnlock()
+
+	if ok {
+		if err := handler(value); err != nil {
+			hw.client.opts.logger.Error("handler error", "hash", hw.hash, "field", field, "error", err)
+		}
+	} else if catchAll != nil {
+		if err := catchAll(field, value); err != nil {
+			hw.client.opts.logger.Error("catch-all handler error", "hash", hw.hash, "field", field, "error", err)
+		}
 	}
 }
 
