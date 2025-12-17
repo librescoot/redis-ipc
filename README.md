@@ -11,6 +11,8 @@ Redis-based IPC library for Go with type-safe generics, functional options, and 
 - **Graceful Shutdown**: Wait for handlers to complete
 - **Hash State Pattern**: Atomic HSET + PUBLISH with change detection
 - **Fault Set Management**: Redis SET with pub/sub notifications
+- **Stream Publishing**: XADD with configurable max length
+- **Stream Consumption**: XREAD with optional consumer groups
 
 ## Installation
 
@@ -135,6 +137,29 @@ defer watcher.Stop()
 all, _ := watcher.FetchAll(ctx)
 ```
 
+#### StartWithSync
+
+Subscribe first, fetch current state, then process messages. This avoids race conditions:
+
+```go
+watcher := client.NewHashWatcher("vehicle")
+watcher.OnField("state", handleState)
+
+// Subscribes, fetches HGETALL, calls handlers, then processes messages
+watcher.StartWithSync(ctx)
+```
+
+#### Debouncing
+
+Coalesce rapid updates - only the last value is passed to handlers after the quiet period:
+
+```go
+watcher := client.NewHashWatcher("vehicle")
+watcher.SetDebounce(500 * time.Millisecond)  // Wait 500ms after last update
+watcher.OnField("speed", handleSpeed)        // Called once after rapid changes settle
+watcher.Start()
+```
+
 ### FaultSet
 
 ```go
@@ -145,6 +170,83 @@ faults.Add(ctx, 35)     // SADD + PUBLISH
 faults.Remove(ctx, 35)  // SREM + PUBLISH
 faults.Has(ctx, 35)     // SISMEMBER
 faults.All(ctx)         // SMEMBERS
+```
+
+## Redis Streams
+
+### StreamPublisher
+
+Publish events to a Redis stream using XADD:
+
+```go
+// Create publisher with default max length (1000)
+stream := client.NewStreamPublisher("events:faults")
+
+// Or with custom max length
+stream := client.NewStreamPublisher("events:faults", ipc.WithMaxLen(5000))
+
+// Publish a map
+id, err := stream.Add(ctx, map[string]any{
+    "group":       "battery:0",
+    "code":        "35",
+    "description": "NFC Reader Error",
+})
+
+// Publish a typed struct (JSON-encoded to fields)
+type FaultEvent struct {
+    Group       string `json:"group"`
+    Code        int    `json:"code"`
+    Description string `json:"description"`
+}
+
+id, err := ipc.StreamAdd(stream, ctx, FaultEvent{
+    Group:       "battery:0",
+    Code:        35,
+    Description: "NFC Reader Error",
+})
+```
+
+### StreamConsumer
+
+Consume stream messages using XREAD:
+
+```go
+// Create consumer
+consumer := client.NewStreamConsumer("events:faults",
+    ipc.WithBlockTimeout(1 * time.Second),
+)
+
+// Set handler
+consumer.Handle(func(id string, values map[string]string) error {
+    log.Printf("Fault %s: group=%s code=%s", id, values["group"], values["code"])
+    return nil
+})
+
+// Start from beginning ("0") or only new messages ("$")
+consumer.Start(ctx, "0")
+
+// Or use typed handler
+ipc.StreamHandle(consumer, func(id string, evt FaultEvent) error {
+    log.Printf("Fault: %+v", evt)
+    return nil
+})
+consumer.Start(ctx, "$")
+```
+
+### Consumer Groups
+
+For multi-instance consumption with acknowledgment:
+
+```go
+consumer := client.NewStreamConsumer("events:faults",
+    ipc.WithBlockTimeout(1 * time.Second),
+    ipc.WithConsumerGroup("uplink-service", "instance-1"),
+)
+
+consumer.Handle(handler)
+
+// ">" means only undelivered messages to this group
+consumer.Start(ctx, ">")
 ```
 
 ## Transactions
