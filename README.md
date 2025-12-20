@@ -107,6 +107,18 @@ vehicle.SetManyIfChanged(ctx, map[string]any{
 // Set with automatic timestamp field
 vehicle.SetWithTimestamp(ctx, "state", "ready")
 // Sets both "state" and "state:timestamp"
+
+// Delete a single field
+vehicle.Delete(ctx, "old-field")
+
+// Clear entire hash
+vehicle.Clear(ctx)
+
+// Atomic replace: DEL + HMSET + PUBLISH
+vehicle.ReplaceAll(ctx, map[string]any{
+    "state": "ready",
+    "speed": 0,
+})
 ```
 
 ### HashWatcher
@@ -341,6 +353,86 @@ client.Do(ctx, "PING")
 
 // Access underlying go-redis client
 client.Raw().Scan(ctx, ...)
+```
+
+## Best Practices
+
+### Reuse Publishers and Watchers
+
+Create publishers once and store them in your service struct:
+
+```go
+// Good: create once, reuse
+type Service struct {
+    client   *ipc.Client
+    powerPub *ipc.HashPublisher
+    battPub  *ipc.HashPublisher
+}
+
+func NewService(client *ipc.Client) *Service {
+    return &Service{
+        client:   client,
+        powerPub: client.NewHashPublisher("power-manager"),
+        battPub:  client.NewHashPublisher("battery:0"),
+    }
+}
+
+func (s *Service) UpdatePowerState(ctx context.Context, state string) error {
+    return s.powerPub.Set(ctx, "state", state)
+}
+
+// Bad: creates new publisher on every call (wasteful)
+func (s *Service) UpdatePowerStateBad(ctx context.Context, state string) error {
+    pub := s.client.NewHashPublisher("power-manager")
+    return pub.Set(ctx, "state", state)
+}
+```
+
+### Use SetManyIfChanged for Bulk Updates
+
+When updating multiple fields, `SetManyIfChanged` only publishes changed fields:
+
+```go
+// Returns list of actually-changed fields (useful for logging)
+changed, err := pub.SetManyIfChanged(ctx, map[string]any{
+    "state":  newState,
+    "speed":  newSpeed,
+    "charge": newCharge,
+})
+if len(changed) > 0 {
+    log.Printf("Updated fields: %v", changed)
+}
+```
+
+### Use ReplaceAll for Complete Hash Replacement
+
+When you need to atomically clear and repopulate a hash (e.g., inhibitor lists):
+
+```go
+// Atomic: DEL + HMSET + PUBLISH in one transaction
+pub.ReplaceAll(ctx, map[string]any{
+    "inhibitor1": "reason1",
+    "inhibitor2": "reason2",
+})
+
+// Clear the hash entirely
+pub.ReplaceAll(ctx, nil)  // or pub.Clear(ctx)
+```
+
+### Use StartWithSync for Initial State
+
+When you need current values before processing updates:
+
+```go
+watcher := client.NewHashWatcher("vehicle")
+watcher.OnField("state", handleState)
+
+// StartWithSync: Subscribe → HGETALL → call handlers → process messages
+// Ensures no messages are missed during initialization
+watcher.StartWithSync(ctx)
+
+// vs Start(): Just subscribes, doesn't fetch initial state
+// watcher.Start()
 ```
 
 ## License

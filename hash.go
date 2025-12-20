@@ -209,6 +209,68 @@ func (hp *HashPublisher) Channel() string {
 	return hp.channel
 }
 
+// Delete removes a field from the hash and publishes notification.
+func (hp *HashPublisher) Delete(ctx context.Context, field string) error {
+	pipe := hp.client.redis.Pipeline()
+	pipe.HDel(ctx, hp.hash, field)
+	pipe.Publish(ctx, hp.channel, field)
+	_, err := pipe.Exec(ctx)
+
+	if err == nil {
+		hp.mu.Lock()
+		delete(hp.previous, field)
+		hp.mu.Unlock()
+	}
+
+	return err
+}
+
+// Clear deletes the entire hash and publishes "cleared" notification.
+func (hp *HashPublisher) Clear(ctx context.Context) error {
+	pipe := hp.client.redis.Pipeline()
+	pipe.Del(ctx, hp.hash)
+	pipe.Publish(ctx, hp.channel, "cleared")
+	_, err := pipe.Exec(ctx)
+
+	if err == nil {
+		hp.mu.Lock()
+		hp.previous = make(map[string]string)
+		hp.mu.Unlock()
+	}
+
+	return err
+}
+
+// ReplaceAll atomically deletes all fields and sets new ones.
+// This solves the race condition in DEL + HMSET + PUBLISH patterns.
+// If fields is nil or empty, just deletes and publishes "cleared".
+func (hp *HashPublisher) ReplaceAll(ctx context.Context, fields map[string]any) error {
+	pipe := hp.client.redis.Pipeline()
+	pipe.Del(ctx, hp.hash)
+
+	if len(fields) > 0 {
+		for field, value := range fields {
+			pipe.HSet(ctx, hp.hash, field, stringify(value))
+		}
+		pipe.Publish(ctx, hp.channel, "replaced")
+	} else {
+		pipe.Publish(ctx, hp.channel, "cleared")
+	}
+
+	_, err := pipe.Exec(ctx)
+
+	if err == nil {
+		hp.mu.Lock()
+		hp.previous = make(map[string]string)
+		for field, value := range fields {
+			hp.previous[field] = stringify(value)
+		}
+		hp.mu.Unlock()
+	}
+
+	return err
+}
+
 // HashWatcher subscribes to a channel and fetches hash values on notification.
 // This matches the LibreScoot consumer pattern.
 type HashWatcher struct {

@@ -540,3 +540,152 @@ func TestHashWatcherDebounce(t *testing.T) {
 	// Cleanup
 	client.Del(ctx, hash)
 }
+
+func TestHashPublisherDelete(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	hash := "test:hashdelete:" + time.Now().Format(time.RFC3339Nano)
+
+	pub := client.NewHashPublisher(hash)
+
+	// Set some fields
+	err = pub.SetMany(ctx, map[string]any{
+		"field1": "value1",
+		"field2": "value2",
+	})
+	if err != nil {
+		t.Fatalf("SetMany() failed: %v", err)
+	}
+
+	// Delete one field
+	err = pub.Delete(ctx, "field1")
+	if err != nil {
+		t.Fatalf("Delete() failed: %v", err)
+	}
+
+	// Verify field1 is gone but field2 remains
+	all, err := pub.GetAll(ctx)
+	if err != nil {
+		t.Fatalf("GetAll() failed: %v", err)
+	}
+	if _, ok := all["field1"]; ok {
+		t.Error("field1 should be deleted")
+	}
+	if all["field2"] != "value2" {
+		t.Errorf("field2 = %q, want value2", all["field2"])
+	}
+
+	// Cleanup
+	client.Del(ctx, hash)
+}
+
+func TestHashPublisherClear(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	hash := "test:hashclear:" + time.Now().Format(time.RFC3339Nano)
+
+	pub := client.NewHashPublisher(hash)
+
+	// Set some fields
+	err = pub.SetMany(ctx, map[string]any{
+		"field1": "value1",
+		"field2": "value2",
+	})
+	if err != nil {
+		t.Fatalf("SetMany() failed: %v", err)
+	}
+
+	// Clear the hash
+	err = pub.Clear(ctx)
+	if err != nil {
+		t.Fatalf("Clear() failed: %v", err)
+	}
+
+	// Verify hash is empty
+	all, err := pub.GetAll(ctx)
+	if err != nil {
+		t.Fatalf("GetAll() failed: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("Hash should be empty, got %d fields", len(all))
+	}
+
+	// Cleanup
+	client.Del(ctx, hash)
+}
+
+func TestHashPublisherReplaceAll(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	hash := "test:hashreplaceall:" + time.Now().Format(time.RFC3339Nano)
+
+	pub := client.NewHashPublisher(hash)
+
+	// Set initial fields
+	err = pub.SetMany(ctx, map[string]any{
+		"old1": "value1",
+		"old2": "value2",
+	})
+	if err != nil {
+		t.Fatalf("SetMany() failed: %v", err)
+	}
+
+	// Replace all with new fields
+	err = pub.ReplaceAll(ctx, map[string]any{
+		"new1": "newvalue1",
+		"new2": "newvalue2",
+	})
+	if err != nil {
+		t.Fatalf("ReplaceAll() failed: %v", err)
+	}
+
+	// Verify old fields are gone and new ones exist
+	all, err := pub.GetAll(ctx)
+	if err != nil {
+		t.Fatalf("GetAll() failed: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("Expected 2 fields, got %d", len(all))
+	}
+	if _, ok := all["old1"]; ok {
+		t.Error("old1 should be deleted")
+	}
+	if all["new1"] != "newvalue1" {
+		t.Errorf("new1 = %q, want newvalue1", all["new1"])
+	}
+	if all["new2"] != "newvalue2" {
+		t.Errorf("new2 = %q, want newvalue2", all["new2"])
+	}
+
+	// Test ReplaceAll with nil (should clear)
+	err = pub.ReplaceAll(ctx, nil)
+	if err != nil {
+		t.Fatalf("ReplaceAll(nil) failed: %v", err)
+	}
+
+	all, err = pub.GetAll(ctx)
+	if err != nil {
+		t.Fatalf("GetAll() failed: %v", err)
+	}
+	if len(all) != 0 {
+		t.Errorf("Hash should be empty after ReplaceAll(nil), got %d fields", len(all))
+	}
+
+	// Cleanup
+	client.Del(ctx, hash)
+}
