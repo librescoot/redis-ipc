@@ -119,6 +119,16 @@ vehicle.ReplaceAll(ctx, map[string]any{
     "state": "ready",
     "speed": 0,
 })
+
+// Set without publishing (silent update)
+vehicle.Set(ctx, "internal-state", "value", ipc.NoPublish())
+vehicle.SetMany(ctx, fields, ipc.NoPublish())
+
+// Batch update with single notification
+vehicle.SetManyPublishOne(ctx, map[string]any{
+    "lat": "52.520",
+    "lon": "13.405",
+}, "location")  // Publishes only "location", not each field
 ```
 
 ### HashWatcher

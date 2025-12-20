@@ -689,3 +689,157 @@ func TestHashPublisherReplaceAll(t *testing.T) {
 	// Cleanup
 	client.Del(ctx, hash)
 }
+
+func TestHashPublisherNoPublish(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	hash := "test:nopublish:" + time.Now().Format(time.RFC3339Nano)
+	pub := client.NewHashPublisher(hash)
+
+	// Subscribe to verify no publish happens
+	pubsub := client.Raw().Subscribe(ctx, hash)
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+	time.Sleep(100 * time.Millisecond) // Wait for subscription
+
+	// Set with NoPublish
+	err = pub.Set(ctx, "field1", "value1", NoPublish())
+	if err != nil {
+		t.Fatalf("Set() with NoPublish failed: %v", err)
+	}
+
+	// Verify value was set
+	val, err := pub.Get(ctx, "field1")
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	if val != "value1" {
+		t.Errorf("Get() = %q, want %q", val, "value1")
+	}
+
+	// Verify no message was published
+	select {
+	case msg := <-ch:
+		t.Errorf("Unexpected message received: %v", msg.Payload)
+	case <-time.After(200 * time.Millisecond):
+		// Expected - no message
+	}
+
+	// Cleanup
+	client.Del(ctx, hash)
+}
+
+func TestHashPublisherSetManyNoPublish(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	hash := "test:setmany-nopub:" + time.Now().Format(time.RFC3339Nano)
+	pub := client.NewHashPublisher(hash)
+
+	// Subscribe to verify no publish happens
+	pubsub := client.Raw().Subscribe(ctx, hash)
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+	time.Sleep(100 * time.Millisecond)
+
+	// SetMany with NoPublish
+	err = pub.SetMany(ctx, map[string]any{
+		"field1": "value1",
+		"field2": "value2",
+	}, NoPublish())
+	if err != nil {
+		t.Fatalf("SetMany() with NoPublish failed: %v", err)
+	}
+
+	// Verify values were set
+	all, err := pub.GetAll(ctx)
+	if err != nil {
+		t.Fatalf("GetAll() failed: %v", err)
+	}
+	if all["field1"] != "value1" || all["field2"] != "value2" {
+		t.Errorf("GetAll() = %v, want field1=value1, field2=value2", all)
+	}
+
+	// Verify no messages were published
+	select {
+	case msg := <-ch:
+		t.Errorf("Unexpected message received: %v", msg.Payload)
+	case <-time.After(200 * time.Millisecond):
+		// Expected - no message
+	}
+
+	// Cleanup
+	client.Del(ctx, hash)
+}
+
+func TestHashPublisherSetManyPublishOne(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	hash := "test:setmany-pubone:" + time.Now().Format(time.RFC3339Nano)
+	pub := client.NewHashPublisher(hash)
+
+	// Subscribe
+	pubsub := client.Raw().Subscribe(ctx, hash)
+	defer pubsub.Close()
+
+	ch := pubsub.Channel()
+	time.Sleep(100 * time.Millisecond)
+
+	// SetManyPublishOne
+	err = pub.SetManyPublishOne(ctx, map[string]any{
+		"field1": "value1",
+		"field2": "value2",
+		"field3": "value3",
+	}, "batch-update")
+	if err != nil {
+		t.Fatalf("SetManyPublishOne() failed: %v", err)
+	}
+
+	// Verify values were set
+	all, err := pub.GetAll(ctx)
+	if err != nil {
+		t.Fatalf("GetAll() failed: %v", err)
+	}
+	if len(all) != 3 {
+		t.Errorf("Expected 3 fields, got %d", len(all))
+	}
+
+	// Verify only one message was published
+	var messages []string
+	timeout := time.After(500 * time.Millisecond)
+	for {
+		select {
+		case msg := <-ch:
+			messages = append(messages, msg.Payload)
+		case <-timeout:
+			goto done
+		}
+	}
+done:
+
+	if len(messages) != 1 {
+		t.Errorf("Expected 1 message, got %d: %v", len(messages), messages)
+	}
+	if len(messages) > 0 && messages[0] != "batch-update" {
+		t.Errorf("Message = %q, want %q", messages[0], "batch-update")
+	}
+
+	// Cleanup
+	client.Del(ctx, hash)
+}

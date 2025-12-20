@@ -11,6 +11,23 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// SetOption configures Set/SetMany behavior
+type SetOption func(*setConfig)
+
+type setConfig struct {
+	publish bool
+}
+
+func defaultSetConfig() *setConfig {
+	return &setConfig{publish: true}
+}
+
+// NoPublish prevents publishing after the set operation.
+// Use when you want to update state without notifying subscribers.
+func NoPublish() SetOption {
+	return func(c *setConfig) { c.publish = false }
+}
+
 // HashPublisher provides atomic HSET + PUBLISH with change detection.
 // This matches the LibreScoot pattern where:
 // - State is stored in a Redis hash
@@ -46,13 +63,20 @@ func (c *Client) NewHashPublisherWithChannel(hash, channel string) *HashPublishe
 }
 
 // Set atomically sets a hash field and publishes the field name.
-// Always publishes regardless of whether the value changed.
-func (hp *HashPublisher) Set(ctx context.Context, field string, value any) error {
+// By default, always publishes. Use NoPublish() to skip publishing.
+func (hp *HashPublisher) Set(ctx context.Context, field string, value any, opts ...SetOption) error {
+	cfg := defaultSetConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	strVal := stringify(value)
 
 	pipe := hp.client.redis.Pipeline()
 	pipe.HSet(ctx, hp.hash, field, strVal)
-	pipe.Publish(ctx, hp.channel, field)
+	if cfg.publish {
+		pipe.Publish(ctx, hp.channel, field)
+	}
 	_, err := pipe.Exec(ctx)
 
 	if err == nil {
@@ -92,17 +116,51 @@ func (hp *HashPublisher) SetIfChanged(ctx context.Context, field string, value a
 }
 
 // SetMany atomically sets multiple fields and publishes each one.
-func (hp *HashPublisher) SetMany(ctx context.Context, fields map[string]any) error {
+// By default, publishes each field. Use NoPublish() to skip publishing.
+func (hp *HashPublisher) SetMany(ctx context.Context, fields map[string]any, opts ...SetOption) error {
 	if len(fields) == 0 {
 		return nil
+	}
+
+	cfg := defaultSetConfig()
+	for _, opt := range opts {
+		opt(cfg)
 	}
 
 	pipe := hp.client.redis.Pipeline()
 	for field, value := range fields {
 		strVal := stringify(value)
 		pipe.HSet(ctx, hp.hash, field, strVal)
-		pipe.Publish(ctx, hp.channel, field)
+		if cfg.publish {
+			pipe.Publish(ctx, hp.channel, field)
+		}
 	}
+	_, err := pipe.Exec(ctx)
+
+	if err == nil {
+		hp.mu.Lock()
+		for field, value := range fields {
+			hp.previous[field] = stringify(value)
+		}
+		hp.mu.Unlock()
+	}
+
+	return err
+}
+
+// SetManyPublishOne sets multiple fields but publishes only a single notification.
+// Useful for batch updates where you only want one notification at the end.
+// The notification parameter is published as the message payload.
+func (hp *HashPublisher) SetManyPublishOne(ctx context.Context, fields map[string]any, notification string) error {
+	if len(fields) == 0 {
+		return nil
+	}
+
+	pipe := hp.client.redis.Pipeline()
+	for field, value := range fields {
+		pipe.HSet(ctx, hp.hash, field, stringify(value))
+	}
+	pipe.Publish(ctx, hp.channel, notification)
 	_, err := pipe.Exec(ctx)
 
 	if err == nil {
