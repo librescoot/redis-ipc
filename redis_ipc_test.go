@@ -383,3 +383,39 @@ func TestPing(t *testing.T) {
 		t.Errorf("Ping() failed: %v", err)
 	}
 }
+
+func TestHash(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	hash := "test:hash-cache:" + time.Now().Format(time.RFC3339Nano)
+
+	// Get publisher twice - should be same instance
+	pub1 := client.Hash(hash)
+	pub2 := client.Hash(hash)
+
+	if pub1 != pub2 {
+		t.Error("Hash() should return cached instance")
+	}
+
+	// Verify it works
+	err = pub1.Set(ctx, "field", "value")
+	if err != nil {
+		t.Fatalf("Set() failed: %v", err)
+	}
+
+	val, err := pub2.Get(ctx, "field")
+	if err != nil {
+		t.Fatalf("Get() failed: %v", err)
+	}
+	if val != "value" {
+		t.Errorf("Get() = %q, want %q", val, "value")
+	}
+
+	// Cleanup
+	client.Del(ctx, hash)
+}

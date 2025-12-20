@@ -172,6 +172,7 @@ type Client struct {
 	connMu      sync.RWMutex
 	subGroups   sync.Map
 	reqHandlers sync.Map
+	hashPubs    sync.Map // cached HashPublisher instances
 }
 
 // New creates a new Redis IPC client with functional options
@@ -701,4 +702,17 @@ func (c *Client) Raw() *redis.Client {
 // Ping checks if the Redis server is reachable
 func (c *Client) Ping(ctx context.Context) error {
 	return c.redis.Ping(ctx).Err()
+}
+
+// Hash returns a cached HashPublisher for the given hash name.
+// Publishers are created on first access and reused thereafter.
+// This is more ergonomic than NewHashPublisher when you don't need
+// to store the publisher in a struct field.
+func (c *Client) Hash(name string) *HashPublisher {
+	if pub, ok := c.hashPubs.Load(name); ok {
+		return pub.(*HashPublisher)
+	}
+	pub := c.NewHashPublisher(name)
+	c.hashPubs.Store(name, pub)
+	return pub
 }
