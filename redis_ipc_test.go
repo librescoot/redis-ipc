@@ -1,7 +1,6 @@
 package redis_ipc
 
 import (
-	"context"
 	"sync"
 	"testing"
 	"time"
@@ -42,17 +41,16 @@ func TestGetSet(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
 	key := "test:getset:" + time.Now().Format(time.RFC3339Nano)
 
 	// Set
-	err = client.Set(ctx, key, "hello", 10*time.Second)
+	err = client.Set(key, "hello", 10*time.Second)
 	if err != nil {
 		t.Fatalf("Set() failed: %v", err)
 	}
 
 	// Get
-	val, err := client.Get(ctx, key)
+	val, err := client.Get(key)
 	if err != nil {
 		t.Fatalf("Get() failed: %v", err)
 	}
@@ -61,7 +59,7 @@ func TestGetSet(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(ctx, key)
+	client.Del(key)
 }
 
 func TestHGetHSet(t *testing.T) {
@@ -71,17 +69,16 @@ func TestHGetHSet(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
 	key := "test:hash:" + time.Now().Format(time.RFC3339Nano)
 
 	// HSet
-	err = client.HSet(ctx, key, "field1", "value1")
+	err = client.HSet(key, "field1", "value1")
 	if err != nil {
 		t.Fatalf("HSet() failed: %v", err)
 	}
 
 	// HGet
-	val, err := client.HGet(ctx, key, "field1")
+	val, err := client.HGet(key, "field1")
 	if err != nil {
 		t.Fatalf("HGet() failed: %v", err)
 	}
@@ -90,7 +87,7 @@ func TestHGetHSet(t *testing.T) {
 	}
 
 	// HGetAll
-	all, err := client.HGetAll(ctx, key)
+	all, err := client.HGetAll(key)
 	if err != nil {
 		t.Fatalf("HGetAll() failed: %v", err)
 	}
@@ -99,7 +96,7 @@ func TestHGetHSet(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(ctx, key)
+	client.Del(key)
 }
 
 func TestSubscribeTyped(t *testing.T) {
@@ -109,7 +106,6 @@ func TestSubscribeTyped(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
 	channel := "test:subscribe:" + time.Now().Format(time.RFC3339Nano)
 
 	type TestMessage struct {
@@ -131,7 +127,7 @@ func TestSubscribeTyped(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Publish
-	err = PublishTyped(client, ctx, channel, TestMessage{Name: "test", Value: 42})
+	err = PublishTyped(client, channel, TestMessage{Name: "test", Value: 42})
 	if err != nil {
 		t.Fatalf("PublishTyped() failed: %v", err)
 	}
@@ -154,7 +150,6 @@ func TestHandleRequests(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
 	queue := "test:queue:" + time.Now().Format(time.RFC3339Nano)
 
 	type Command struct {
@@ -172,7 +167,7 @@ func TestHandleRequests(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Send request
-	err = SendRequest(client, ctx, queue, Command{Action: "test"})
+	err = SendRequest(client, queue, Command{Action: "test"})
 	if err != nil {
 		t.Fatalf("SendRequest() failed: %v", err)
 	}
@@ -195,14 +190,13 @@ func TestTxGroup(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
 	key := "test:tx:" + time.Now().Format(time.RFC3339Nano)
 
 	tx := client.NewTxGroup()
 	tx.Add("SET", key, "value1")
 	tx.Add("GET", key)
 
-	results, err := tx.Exec(ctx)
+	results, err := tx.Exec()
 	if err != nil {
 		t.Fatalf("Exec() failed: %v", err)
 	}
@@ -216,7 +210,7 @@ func TestTxGroup(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(ctx, key)
+	client.Del(key)
 }
 
 func TestRouter(t *testing.T) {
@@ -226,7 +220,6 @@ func TestRouter(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
 	channel := "test:router:" + time.Now().Format(time.RFC3339Nano)
 
 	type StateMsg struct {
@@ -259,13 +252,13 @@ func TestRouter(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	// Publish state message
-	err = PublishRouted(client, ctx, channel, "state", StateMsg{State: "ready"})
+	err = PublishRouted(client, channel, "state", StateMsg{State: "ready"})
 	if err != nil {
 		t.Fatalf("PublishRouted() failed: %v", err)
 	}
 
 	// Publish error message
-	err = PublishRouted(client, ctx, channel, "error", ErrorMsg{Code: 500})
+	err = PublishRouted(client, channel, "error", ErrorMsg{Code: 500})
 	if err != nil {
 		t.Fatalf("PublishRouted() failed: %v", err)
 	}
@@ -377,8 +370,7 @@ func TestPing(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
-	err = client.Ping(ctx)
+	err = client.Ping()
 	if err != nil {
 		t.Errorf("Ping() failed: %v", err)
 	}
@@ -391,7 +383,6 @@ func TestHash(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
 	hash := "test:hash-cache:" + time.Now().Format(time.RFC3339Nano)
 
 	// Get publisher twice - should be same instance
@@ -403,12 +394,12 @@ func TestHash(t *testing.T) {
 	}
 
 	// Verify it works
-	err = pub1.Set(ctx, "field", "value")
+	err = pub1.Set("field", "value")
 	if err != nil {
 		t.Fatalf("Set() failed: %v", err)
 	}
 
-	val, err := pub2.Get(ctx, "field")
+	val, err := pub2.Get("field")
 	if err != nil {
 		t.Fatalf("Get() failed: %v", err)
 	}
@@ -417,5 +408,5 @@ func TestHash(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(ctx, hash)
+	client.Del(hash)
 }

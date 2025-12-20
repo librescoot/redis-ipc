@@ -13,13 +13,12 @@ func TestStreamPublisher(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
 	stream := "test:stream:" + time.Now().Format(time.RFC3339Nano)
 
 	pub := client.NewStreamPublisher(stream, WithMaxLen(100))
 
 	// Add a message
-	id, err := pub.Add(ctx, map[string]any{
+	id, err := pub.Add(map[string]any{
 		"group": "test",
 		"code":  "42",
 		"msg":   "hello",
@@ -32,7 +31,7 @@ func TestStreamPublisher(t *testing.T) {
 	}
 
 	// Verify message exists
-	msgs, err := client.redis.XRange(ctx, stream, "-", "+").Result()
+	msgs, err := client.redis.XRange(client.Context(), stream, "-", "+").Result()
 	if err != nil {
 		t.Fatalf("XRange() failed: %v", err)
 	}
@@ -44,7 +43,7 @@ func TestStreamPublisher(t *testing.T) {
 	}
 
 	// Cleanup
-	client.redis.Del(ctx, stream)
+	client.redis.Del(client.Context(), stream)
 }
 
 func TestStreamPublisherTyped(t *testing.T) {
@@ -54,7 +53,6 @@ func TestStreamPublisherTyped(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
 	stream := "test:streamtyped:" + time.Now().Format(time.RFC3339Nano)
 
 	type FaultEvent struct {
@@ -65,7 +63,7 @@ func TestStreamPublisherTyped(t *testing.T) {
 
 	pub := client.NewStreamPublisher(stream)
 
-	id, err := StreamAdd(pub, ctx, FaultEvent{
+	id, err := StreamAdd(pub, FaultEvent{
 		Group:       "battery:0",
 		Code:        35,
 		Description: "NFC Reader Error",
@@ -78,7 +76,7 @@ func TestStreamPublisherTyped(t *testing.T) {
 	}
 
 	// Verify
-	msgs, err := client.redis.XRange(ctx, stream, "-", "+").Result()
+	msgs, err := client.redis.XRange(client.Context(), stream, "-", "+").Result()
 	if err != nil {
 		t.Fatalf("XRange() failed: %v", err)
 	}
@@ -90,7 +88,7 @@ func TestStreamPublisherTyped(t *testing.T) {
 	}
 
 	// Cleanup
-	client.redis.Del(ctx, stream)
+	client.redis.Del(client.Context(), stream)
 }
 
 func TestStreamConsumer(t *testing.T) {
@@ -99,9 +97,6 @@ func TestStreamConsumer(t *testing.T) {
 		t.Fatalf("New() failed: %v", err)
 	}
 	defer client.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	stream := "test:consumer:" + time.Now().Format(time.RFC3339Nano)
 
@@ -117,7 +112,7 @@ func TestStreamConsumer(t *testing.T) {
 	})
 
 	// Start consumer from beginning
-	err = consumer.Start(ctx, "0")
+	err = consumer.Start("0")
 	if err != nil {
 		t.Fatalf("Start() failed: %v", err)
 	}
@@ -126,7 +121,7 @@ func TestStreamConsumer(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Publish a message
-	_, err = pub.Add(ctx, map[string]any{
+	_, err = pub.Add(map[string]any{
 		"test": "value",
 	})
 	if err != nil {
@@ -144,7 +139,6 @@ func TestStreamConsumer(t *testing.T) {
 	}
 
 	// Cleanup
-	cancel()
 	client.redis.Del(context.Background(), stream)
 }
 
@@ -154,9 +148,6 @@ func TestStreamConsumerTyped(t *testing.T) {
 		t.Fatalf("New() failed: %v", err)
 	}
 	defer client.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	stream := "test:consumertyped:" + time.Now().Format(time.RFC3339Nano)
 
@@ -176,7 +167,7 @@ func TestStreamConsumerTyped(t *testing.T) {
 		return nil
 	})
 
-	err = consumer.Start(ctx, "0")
+	err = consumer.Start("0")
 	if err != nil {
 		t.Fatalf("Start() failed: %v", err)
 	}
@@ -184,7 +175,7 @@ func TestStreamConsumerTyped(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Publish
-	_, err = StreamAdd(pub, ctx, Event{Name: "test", Value: "123"})
+	_, err = StreamAdd(pub, Event{Name: "test", Value: "123"})
 	if err != nil {
 		t.Fatalf("StreamAdd() failed: %v", err)
 	}
@@ -200,7 +191,6 @@ func TestStreamConsumerTyped(t *testing.T) {
 	}
 
 	// Cleanup
-	cancel()
 	client.redis.Del(context.Background(), stream)
 }
 
@@ -210,9 +200,6 @@ func TestStreamConsumerGroup(t *testing.T) {
 		t.Fatalf("New() failed: %v", err)
 	}
 	defer client.Close()
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	stream := "test:consumergroup:" + time.Now().Format(time.RFC3339Nano)
 	group := "test-group"
@@ -232,7 +219,7 @@ func TestStreamConsumerGroup(t *testing.T) {
 		return nil
 	})
 
-	err = consumer.Start(ctx, ">")
+	err = consumer.Start(">")
 	if err != nil {
 		t.Fatalf("Start() failed: %v", err)
 	}
@@ -240,7 +227,7 @@ func TestStreamConsumerGroup(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// Publish
-	_, err = pub.Add(ctx, map[string]any{"msg": "hello"})
+	_, err = pub.Add(map[string]any{"msg": "hello"})
 	if err != nil {
 		t.Fatalf("Add() failed: %v", err)
 	}
@@ -256,7 +243,6 @@ func TestStreamConsumerGroup(t *testing.T) {
 	}
 
 	// Cleanup
-	cancel()
 	client.redis.XGroupDestroy(context.Background(), stream, group)
 	client.redis.Del(context.Background(), stream)
 }
@@ -268,21 +254,20 @@ func TestStreamPublisherMaxLen(t *testing.T) {
 	}
 	defer client.Close()
 
-	ctx := context.Background()
 	stream := "test:maxlen:" + time.Now().Format(time.RFC3339Nano)
 
 	pub := client.NewStreamPublisher(stream, WithMaxLen(5))
 
 	// Add 10 messages
 	for i := 0; i < 10; i++ {
-		_, err := pub.Add(ctx, map[string]any{"i": i})
+		_, err := pub.Add(map[string]any{"i": i})
 		if err != nil {
 			t.Fatalf("Add() failed: %v", err)
 		}
 	}
 
 	// Check length (should be approximately 5 due to MAXLEN ~)
-	length, err := client.redis.XLen(ctx, stream).Result()
+	length, err := client.redis.XLen(client.Context(), stream).Result()
 	if err != nil {
 		t.Fatalf("XLen() failed: %v", err)
 	}
@@ -292,5 +277,5 @@ func TestStreamPublisherMaxLen(t *testing.T) {
 	}
 
 	// Cleanup
-	client.redis.Del(ctx, stream)
+	client.redis.Del(client.Context(), stream)
 }

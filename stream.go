@@ -1,7 +1,6 @@
 package redis_ipc
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -48,8 +47,8 @@ func (c *Client) NewStreamPublisher(stream string, opts ...StreamPublisherOption
 
 // Add publishes a message to the stream with auto-generated ID.
 // Returns the generated message ID.
-func (sp *StreamPublisher) Add(ctx context.Context, values map[string]any) (string, error) {
-	return sp.client.redis.XAdd(ctx, &redis.XAddArgs{
+func (sp *StreamPublisher) Add(values map[string]any) (string, error) {
+	return sp.client.redis.XAdd(sp.client.Context(), &redis.XAddArgs{
 		Stream: sp.stream,
 		MaxLen: sp.maxLen,
 		Approx: true, // Use ~ for efficiency
@@ -59,8 +58,8 @@ func (sp *StreamPublisher) Add(ctx context.Context, values map[string]any) (stri
 }
 
 // AddWithID publishes a message with a specific ID.
-func (sp *StreamPublisher) AddWithID(ctx context.Context, id string, values map[string]any) (string, error) {
-	return sp.client.redis.XAdd(ctx, &redis.XAddArgs{
+func (sp *StreamPublisher) AddWithID(id string, values map[string]any) (string, error) {
+	return sp.client.redis.XAdd(sp.client.Context(), &redis.XAddArgs{
 		Stream: sp.stream,
 		MaxLen: sp.maxLen,
 		Approx: true,
@@ -75,7 +74,7 @@ func (sp *StreamPublisher) Stream() string {
 }
 
 // StreamAdd publishes a typed message to the stream using JSON encoding.
-func StreamAdd[T any](sp *StreamPublisher, ctx context.Context, msg T) (string, error) {
+func StreamAdd[T any](sp *StreamPublisher, msg T) (string, error) {
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return "", fmt.Errorf("marshal message: %w", err)
@@ -87,7 +86,7 @@ func StreamAdd[T any](sp *StreamPublisher, ctx context.Context, msg T) (string, 
 		return "", fmt.Errorf("unmarshal to map: %w", err)
 	}
 
-	return sp.Add(ctx, values)
+	return sp.Add(values)
 }
 
 // StreamConsumer consumes messages from a Redis stream using XREAD.
@@ -155,7 +154,7 @@ func (sc *StreamConsumer) Handle(handler func(id string, values map[string]strin
 //   - "0" to read from the beginning
 //   - A specific message ID to read after that ID
 //   - ">" for consumer groups (only undelivered messages)
-func (sc *StreamConsumer) Start(ctx context.Context, startID string) error {
+func (sc *StreamConsumer) Start(startID string) error {
 	if sc.handler == nil {
 		return fmt.Errorf("no handler set")
 	}
@@ -171,6 +170,7 @@ func (sc *StreamConsumer) Start(ctx context.Context, startID string) error {
 	// Create consumer group if using group mode
 	if sc.group != "" {
 		// Try to create the group, ignore error if it already exists
+		ctx := sc.client.Context()
 		err := sc.client.redis.XGroupCreateMkStream(ctx, sc.stream, sc.group, "0").Err()
 		if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
 			sc.client.opts.logger.Warn("failed to create consumer group", "error", err)
@@ -178,12 +178,12 @@ func (sc *StreamConsumer) Start(ctx context.Context, startID string) error {
 	}
 
 	sc.client.wg.Add(1)
-	go sc.consumeLoop(ctx, startID)
+	go sc.consumeLoop(startID)
 
 	return nil
 }
 
-func (sc *StreamConsumer) consumeLoop(ctx context.Context, startID string) {
+func (sc *StreamConsumer) consumeLoop(startID string) {
 	defer sc.client.wg.Done()
 	defer func() {
 		sc.mu.Lock()
@@ -195,13 +195,12 @@ func (sc *StreamConsumer) consumeLoop(ctx context.Context, startID string) {
 
 	for {
 		select {
-		case <-ctx.Done():
-			return
 		case <-sc.client.ctx.Done():
 			return
 		default:
 		}
 
+		ctx := sc.client.Context()
 		var streams []redis.XStream
 		var err error
 
@@ -227,7 +226,7 @@ func (sc *StreamConsumer) consumeLoop(ctx context.Context, startID string) {
 			if err == redis.Nil {
 				continue // No messages, keep waiting
 			}
-			if ctx.Err() != nil || sc.client.ctx.Err() != nil {
+			if sc.client.ctx.Err() != nil {
 				return
 			}
 			sc.client.opts.logger.Error("XREAD error", "stream", sc.stream, "error", err)

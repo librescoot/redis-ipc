@@ -241,6 +241,28 @@ func (c *Client) Logger() *slog.Logger {
 	return c.opts.logger
 }
 
+// Context returns the client's context for operations.
+func (c *Client) Context() context.Context {
+	return c.ctx
+}
+
+// ContextClient wraps a Client with a specific context for operations.
+type ContextClient struct {
+	*Client
+	ctx context.Context
+}
+
+// WithContext returns a context-scoped client wrapper.
+// Use this when you need a custom context (e.g., with timeout) for operations.
+func (c *Client) WithContext(ctx context.Context) *ContextClient {
+	return &ContextClient{Client: c, ctx: ctx}
+}
+
+// Context returns the custom context for this wrapper.
+func (cc *ContextClient) Context() context.Context {
+	return cc.ctx
+}
+
 // Codec returns the client's codec
 func (c *Client) Codec() Codec {
 	return c.opts.codec
@@ -522,7 +544,7 @@ func (r *Router) Stop() error {
 }
 
 // PublishRouted publishes a message with type routing
-func PublishRouted[T any](c *Client, ctx context.Context, channel, msgType string, data T) error {
+func PublishRouted[T any](c *Client, channel, msgType string, data T) error {
 	dataBytes, err := json.Marshal(data)
 	if err != nil {
 		return fmt.Errorf("marshal data: %w", err)
@@ -538,7 +560,7 @@ func PublishRouted[T any](c *Client, ctx context.Context, channel, msgType strin
 		return fmt.Errorf("marshal envelope: %w", err)
 	}
 
-	return c.redis.Publish(ctx, channel, envBytes).Err()
+	return c.redis.Publish(c.Context(), channel, envBytes).Err()
 }
 
 // TxGroup batches Redis commands for atomic execution
@@ -563,8 +585,8 @@ func (g *TxGroup) Add(cmd string, args ...interface{}) *TxGroup {
 }
 
 // Exec executes all queued commands and returns results
-func (g *TxGroup) Exec(ctx context.Context) ([]interface{}, error) {
-	cmders, err := g.pipe.Exec(ctx)
+func (g *TxGroup) Exec() ([]interface{}, error) {
+	cmders, err := g.pipe.Exec(g.client.Context())
 	if err != nil && err != redis.Nil {
 		return nil, err
 	}
@@ -586,112 +608,112 @@ func (g *TxGroup) Exec(ctx context.Context) ([]interface{}, error) {
 // Direct Redis operations with context
 
 // Do executes a Redis command
-func (c *Client) Do(ctx context.Context, cmd string, args ...interface{}) (interface{}, error) {
+func (c *Client) Do(cmd string, args ...interface{}) (interface{}, error) {
 	cmdArgs := append([]interface{}{cmd}, args...)
-	return c.redis.Do(ctx, cmdArgs...).Result()
+	return c.redis.Do(c.Context(), cmdArgs...).Result()
 }
 
 // Get retrieves the value of a key
-func (c *Client) Get(ctx context.Context, key string) (string, error) {
-	return c.redis.Get(ctx, key).Result()
+func (c *Client) Get(key string) (string, error) {
+	return c.redis.Get(c.Context(), key).Result()
 }
 
 // Set sets the value of a key
-func (c *Client) Set(ctx context.Context, key string, value interface{}, expiration time.Duration) error {
-	return c.redis.Set(ctx, key, value, expiration).Err()
+func (c *Client) Set(key string, value interface{}, expiration time.Duration) error {
+	return c.redis.Set(c.Context(), key, value, expiration).Err()
 }
 
 // HGet retrieves the value of a hash field
-func (c *Client) HGet(ctx context.Context, key, field string) (string, error) {
-	return c.redis.HGet(ctx, key, field).Result()
+func (c *Client) HGet(key, field string) (string, error) {
+	return c.redis.HGet(c.Context(), key, field).Result()
 }
 
 // HSet sets the value of a hash field
-func (c *Client) HSet(ctx context.Context, key, field string, value interface{}) error {
-	return c.redis.HSet(ctx, key, field, value).Err()
+func (c *Client) HSet(key, field string, value interface{}) error {
+	return c.redis.HSet(c.Context(), key, field, value).Err()
 }
 
 // HGetAll retrieves all fields and values of a hash
-func (c *Client) HGetAll(ctx context.Context, key string) (map[string]string, error) {
-	return c.redis.HGetAll(ctx, key).Result()
+func (c *Client) HGetAll(key string) (map[string]string, error) {
+	return c.redis.HGetAll(c.Context(), key).Result()
 }
 
 // LPush inserts values at the head of a list
-func (c *Client) LPush(ctx context.Context, key string, values ...interface{}) (int64, error) {
-	return c.redis.LPush(ctx, key, values...).Result()
+func (c *Client) LPush(key string, values ...interface{}) (int64, error) {
+	return c.redis.LPush(c.Context(), key, values...).Result()
 }
 
 // RPush inserts values at the tail of a list
-func (c *Client) RPush(ctx context.Context, key string, values ...interface{}) (int64, error) {
-	return c.redis.RPush(ctx, key, values...).Result()
+func (c *Client) RPush(key string, values ...interface{}) (int64, error) {
+	return c.redis.RPush(c.Context(), key, values...).Result()
 }
 
 // LPop removes and returns the first element of a list
-func (c *Client) LPop(ctx context.Context, key string) (string, error) {
-	return c.redis.LPop(ctx, key).Result()
+func (c *Client) LPop(key string) (string, error) {
+	return c.redis.LPop(c.Context(), key).Result()
 }
 
 // RPop removes and returns the last element of a list
-func (c *Client) RPop(ctx context.Context, key string) (string, error) {
-	return c.redis.RPop(ctx, key).Result()
+func (c *Client) RPop(key string) (string, error) {
+	return c.redis.RPop(c.Context(), key).Result()
 }
 
 // BLPop blocks until it can remove and return the first element of a list
-func (c *Client) BLPop(ctx context.Context, timeout time.Duration, keys ...string) ([]string, error) {
-	return c.redis.BLPop(ctx, timeout, keys...).Result()
+func (c *Client) BLPop(timeout time.Duration, keys ...string) ([]string, error) {
+	return c.redis.BLPop(c.Context(), timeout, keys...).Result()
 }
 
 // BRPop blocks until it can remove and return the last element of a list
-func (c *Client) BRPop(ctx context.Context, timeout time.Duration, keys ...string) ([]string, error) {
-	return c.redis.BRPop(ctx, timeout, keys...).Result()
+func (c *Client) BRPop(timeout time.Duration, keys ...string) ([]string, error) {
+	return c.redis.BRPop(c.Context(), timeout, keys...).Result()
 }
 
 // Publish publishes a message to a channel
-func (c *Client) Publish(ctx context.Context, channel string, message interface{}) (int64, error) {
-	return c.redis.Publish(ctx, channel, message).Result()
+func (c *Client) Publish(channel string, message interface{}) (int64, error) {
+	return c.redis.Publish(c.Context(), channel, message).Result()
 }
 
 // PublishTyped publishes a typed message using the client's codec
-func PublishTyped[T any](c *Client, ctx context.Context, channel string, message T) error {
+func PublishTyped[T any](c *Client, channel string, message T) error {
 	data, err := c.opts.codec.Encode(message)
 	if err != nil {
 		return fmt.Errorf("encode message: %w", err)
 	}
-	return c.redis.Publish(ctx, channel, data).Err()
+	return c.redis.Publish(c.Context(), channel, data).Err()
 }
 
 // SendRequest sends a typed message to a queue
-func SendRequest[T any](c *Client, ctx context.Context, queue string, message T) error {
+func SendRequest[T any](c *Client, queue string, message T) error {
 	data, err := c.opts.codec.Encode(message)
 	if err != nil {
 		return fmt.Errorf("encode message: %w", err)
 	}
-	return c.redis.LPush(ctx, queue, data).Err()
+	return c.redis.LPush(c.Context(), queue, data).Err()
 }
 
 // Incr increments the integer value of a key by one
-func (c *Client) Incr(ctx context.Context, key string) (int64, error) {
-	return c.redis.Incr(ctx, key).Result()
+func (c *Client) Incr(key string) (int64, error) {
+	return c.redis.Incr(c.Context(), key).Result()
 }
 
 // Decr decrements the integer value of a key by one
-func (c *Client) Decr(ctx context.Context, key string) (int64, error) {
-	return c.redis.Decr(ctx, key).Result()
+func (c *Client) Decr(key string) (int64, error) {
+	return c.redis.Decr(c.Context(), key).Result()
 }
 
 // Exists checks if keys exist
-func (c *Client) Exists(ctx context.Context, keys ...string) (int64, error) {
-	return c.redis.Exists(ctx, keys...).Result()
+func (c *Client) Exists(keys ...string) (int64, error) {
+	return c.redis.Exists(c.Context(), keys...).Result()
 }
 
 // Del deletes keys
-func (c *Client) Del(ctx context.Context, keys ...string) (int64, error) {
-	return c.redis.Del(ctx, keys...).Result()
+func (c *Client) Del(keys ...string) (int64, error) {
+	return c.redis.Del(c.Context(), keys...).Result()
 }
 
 // Expire sets a key's time to live
-func (c *Client) Expire(ctx context.Context, key string, expiration time.Duration) (bool, error) {
-	return c.redis.Expire(ctx, key, expiration).Result()
+func (c *Client) Expire(key string, expiration time.Duration) (bool, error) {
+	return c.redis.Expire(c.Context(), key, expiration).Result()
 }
 
 // Raw returns the underlying go-redis client for advanced operations
@@ -700,8 +722,8 @@ func (c *Client) Raw() *redis.Client {
 }
 
 // Ping checks if the Redis server is reachable
-func (c *Client) Ping(ctx context.Context) error {
-	return c.redis.Ping(ctx).Err()
+func (c *Client) Ping() error {
+	return c.redis.Ping(c.Context()).Err()
 }
 
 // Hash returns a cached HashPublisher for the given hash name.

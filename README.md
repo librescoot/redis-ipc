@@ -7,7 +7,7 @@ Redis-based IPC library for Go with type-safe generics, functional options, and 
 - **Generics**: Type-safe subscriptions and queue handlers
 - **Functional Options**: Flexible client configuration
 - **Connection Callbacks**: React to connect/disconnect events
-- **Context Propagation**: All operations accept `context.Context`
+- **Context-Free API**: Uses client's internal context by default
 - **Graceful Shutdown**: Wait for handlers to complete
 - **Hash State Pattern**: Atomic HSET + PUBLISH with change detection
 - **Fault Set Management**: Redis SET with pub/sub notifications
@@ -54,8 +54,7 @@ sub, err := ipc.Subscribe(client, "vehicle:events", func(msg VehicleState) error
 defer sub.Unsubscribe()
 
 // Publish typed messages
-ctx := context.Background()
-ipc.PublishTyped(client, ctx, "vehicle:events", VehicleState{State: "ready", Speed: 0})
+ipc.PublishTyped(client, "vehicle:events", VehicleState{State: "ready", Speed: 0})
 ```
 
 ## Queue Processing
@@ -73,7 +72,7 @@ handler := ipc.HandleRequests(client, "scooter:commands", func(cmd Command) erro
 defer handler.Stop()
 
 // Send to queue
-ipc.SendRequest(client, ctx, "scooter:commands", Command{Action: "unlock"})
+ipc.SendRequest(client, "scooter:commands", Command{Action: "unlock"})
 ```
 
 ## LibreScoot Hash Pattern
@@ -92,40 +91,40 @@ vehicle := client.NewHashPublisher("vehicle")
 vehicle := client.NewHashPublisherWithChannel("vehicle", "state")
 
 // Set field and publish atomically
-vehicle.Set(ctx, "state", "ready")
+vehicle.Set("state", "ready")
 
 // Only publish if value changed
-changed, _ := vehicle.SetIfChanged(ctx, "state", "ready")
+changed, _ := vehicle.SetIfChanged("state", "ready")
 
 // Batch updates with selective publishing
-vehicle.SetManyIfChanged(ctx, map[string]any{
+vehicle.SetManyIfChanged(map[string]any{
     "state":      "parked",
     "kickstand":  "down",
     "brake:left": "off",
 })
 
 // Set with automatic timestamp field
-vehicle.SetWithTimestamp(ctx, "state", "ready")
+vehicle.SetWithTimestamp("state", "ready")
 // Sets both "state" and "state:timestamp"
 
 // Delete a single field
-vehicle.Delete(ctx, "old-field")
+vehicle.Delete("old-field")
 
 // Clear entire hash
-vehicle.Clear(ctx)
+vehicle.Clear()
 
 // Atomic replace: DEL + HMSET + PUBLISH
-vehicle.ReplaceAll(ctx, map[string]any{
+vehicle.ReplaceAll(map[string]any{
     "state": "ready",
     "speed": 0,
 })
 
 // Set without publishing (silent update)
-vehicle.Set(ctx, "internal-state", "value", ipc.NoPublish())
-vehicle.SetMany(ctx, fields, ipc.NoPublish())
+vehicle.Set("internal-state", "value", ipc.NoPublish())
+vehicle.SetMany(fields, ipc.NoPublish())
 
 // Batch update with single notification
-vehicle.SetManyPublishOne(ctx, map[string]any{
+vehicle.SetManyPublishOne(map[string]any{
     "lat": "52.520",
     "lon": "13.405",
 }, "location")  // Publishes only "location", not each field
@@ -167,10 +166,10 @@ watcher.Start()
 defer watcher.Stop()
 
 // Fetch initial state
-all, _ := watcher.FetchAll(ctx)
+all, _ := watcher.FetchAll()
 
 // Fetch a single field
-state, _ := watcher.Fetch(ctx, "state")
+state, _ := watcher.Fetch("state")
 ```
 
 #### StartWithSync
@@ -182,7 +181,7 @@ watcher := client.NewHashWatcher("vehicle")
 watcher.OnField("state", handleState)
 
 // Subscribes, fetches HGETALL, calls handlers, then processes messages
-watcher.StartWithSync(ctx)
+watcher.StartWithSync()
 ```
 
 #### Debouncing
@@ -202,11 +201,11 @@ watcher.Start()
 // Manage fault codes in a Redis SET with pub/sub notification
 faults := client.NewFaultSet("battery:0:fault", "battery:0", "fault")
 
-faults.Add(ctx, 35)     // SADD + PUBLISH
-faults.Remove(ctx, 35)  // SREM + PUBLISH
-faults.Has(ctx, 35)     // SISMEMBER
-faults.All(ctx)         // SMEMBERS
-faults.Clear(ctx)       // DEL + PUBLISH
+faults.Add(35)     // SADD + PUBLISH
+faults.Remove(35)  // SREM + PUBLISH
+faults.Has(35)     // SISMEMBER
+faults.All()       // SMEMBERS
+faults.Clear()     // DEL + PUBLISH
 ```
 
 ## Redis Streams
@@ -223,7 +222,7 @@ stream := client.NewStreamPublisher("events:faults")
 stream := client.NewStreamPublisher("events:faults", ipc.WithMaxLen(5000))
 
 // Publish a map
-id, err := stream.Add(ctx, map[string]any{
+id, err := stream.Add(map[string]any{
     "group":       "battery:0",
     "code":        "35",
     "description": "NFC Reader Error",
@@ -236,7 +235,7 @@ type FaultEvent struct {
     Description string `json:"description"`
 }
 
-id, err := ipc.StreamAdd(stream, ctx, FaultEvent{
+id, err := ipc.StreamAdd(stream, FaultEvent{
     Group:       "battery:0",
     Code:        35,
     Description: "NFC Reader Error",
@@ -260,14 +259,14 @@ consumer.Handle(func(id string, values map[string]string) error {
 })
 
 // Start from beginning ("0") or only new messages ("$")
-consumer.Start(ctx, "0")
+consumer.Start("0")
 
 // Or use typed handler
 ipc.StreamHandle(consumer, func(id string, evt FaultEvent) error {
     log.Printf("Fault: %+v", evt)
     return nil
 })
-consumer.Start(ctx, "$")
+consumer.Start("$")
 ```
 
 ### Consumer Groups
@@ -283,7 +282,7 @@ consumer := client.NewStreamConsumer("events:faults",
 consumer.Handle(handler)
 
 // ">" means only undelivered messages to this group
-consumer.Start(ctx, ">")
+consumer.Start(">")
 ```
 
 ## Transactions
@@ -294,7 +293,7 @@ tx.Add("HSET", "vehicle", "state", "ready").
    Add("HSET", "vehicle", "state:timestamp", time.Now().Unix()).
    Add("PUBLISH", "vehicle", "state")
 
-results, err := tx.Exec(ctx)
+results, err := tx.Exec()
 ```
 
 ## Message Router
@@ -311,7 +310,7 @@ router.Start()
 defer router.Stop()
 
 // Publish routed messages
-ipc.PublishRouted(client, ctx, "events", "state", StateMsg{...})
+ipc.PublishRouted(client, "events", "state", StateMsg{...})
 ```
 
 ## Configuration Options
@@ -335,38 +334,38 @@ client, err := ipc.New(
 
 ## Direct Redis Operations
 
-All operations accept `context.Context`:
+All operations use the client's internal context:
 
 ```go
 // Strings
-client.Get(ctx, "key")
-client.Set(ctx, "key", "value", 0)
-client.Incr(ctx, "counter")
+client.Get("key")
+client.Set("key", "value", 0)
+client.Incr("counter")
 
 // Hashes
-client.HGet(ctx, "hash", "field")
-client.HSet(ctx, "hash", "field", "value")
-client.HGetAll(ctx, "hash")
+client.HGet("hash", "field")
+client.HSet("hash", "field", "value")
+client.HGetAll("hash")
 
 // Lists
-client.LPush(ctx, "queue", "value")
-client.BRPop(ctx, time.Second, "queue")
+client.LPush("queue", "value")
+client.BRPop(time.Second, "queue")
 
 // Pub/Sub
-client.Publish(ctx, "channel", "message")
+client.Publish("channel", "message")
 
 // Keys
-client.Exists(ctx, "key")
-client.Del(ctx, "key")
-client.Expire(ctx, "key", time.Hour)
+client.Exists("key")
+client.Del("key")
+client.Expire("key", time.Hour)
 
 // Health check
-client.Ping(ctx)
+client.Ping()
 
 // Raw command
-client.Do(ctx, "PING")
+client.Do("PING")
 
-// Access underlying go-redis client
+// Access underlying go-redis client (requires context)
 client.Raw().Scan(ctx, ...)
 ```
 
@@ -392,14 +391,14 @@ func NewService(client *ipc.Client) *Service {
     }
 }
 
-func (s *Service) UpdatePowerState(ctx context.Context, state string) error {
-    return s.powerPub.Set(ctx, "state", state)
+func (s *Service) UpdatePowerState(state string) error {
+    return s.powerPub.Set("state", state)
 }
 
 // Bad: creates new publisher on every call (wasteful)
-func (s *Service) UpdatePowerStateBad(ctx context.Context, state string) error {
+func (s *Service) UpdatePowerStateBad(state string) error {
     pub := s.client.NewHashPublisher("power-manager")
-    return pub.Set(ctx, "state", state)
+    return pub.Set("state", state)
 }
 ```
 
@@ -409,7 +408,7 @@ When updating multiple fields, `SetManyIfChanged` only publishes changed fields:
 
 ```go
 // Returns list of actually-changed fields (useful for logging)
-changed, err := pub.SetManyIfChanged(ctx, map[string]any{
+changed, err := pub.SetManyIfChanged(map[string]any{
     "state":  newState,
     "speed":  newSpeed,
     "charge": newCharge,
@@ -425,13 +424,13 @@ When you need to atomically clear and repopulate a hash (e.g., inhibitor lists):
 
 ```go
 // Atomic: DEL + HMSET + PUBLISH in one transaction
-pub.ReplaceAll(ctx, map[string]any{
+pub.ReplaceAll(map[string]any{
     "inhibitor1": "reason1",
     "inhibitor2": "reason2",
 })
 
 // Clear the hash entirely
-pub.ReplaceAll(ctx, nil)  // or pub.Clear(ctx)
+pub.ReplaceAll(nil)  // or pub.Clear()
 ```
 
 ### Use StartWithSync for Initial State
@@ -444,7 +443,7 @@ watcher.OnField("state", handleState)
 
 // StartWithSync: Subscribe → HGETALL → call handlers → process messages
 // Ensures no messages are missed during initialization
-watcher.StartWithSync(ctx)
+watcher.StartWithSync()
 
 // vs Start(): Just subscribes, doesn't fetch initial state
 // watcher.Start()

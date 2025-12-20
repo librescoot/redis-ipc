@@ -1,7 +1,6 @@
 package redis_ipc
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -64,13 +63,14 @@ func (c *Client) NewHashPublisherWithChannel(hash, channel string) *HashPublishe
 
 // Set atomically sets a hash field and publishes the field name.
 // By default, always publishes. Use NoPublish() to skip publishing.
-func (hp *HashPublisher) Set(ctx context.Context, field string, value any, opts ...SetOption) error {
+func (hp *HashPublisher) Set(field string, value any, opts ...SetOption) error {
 	cfg := defaultSetConfig()
 	for _, opt := range opts {
 		opt(cfg)
 	}
 
 	strVal := stringify(value)
+	ctx := hp.client.Context()
 
 	pipe := hp.client.redis.Pipeline()
 	pipe.HSet(ctx, hp.hash, field, strVal)
@@ -90,7 +90,7 @@ func (hp *HashPublisher) Set(ctx context.Context, field string, value any, opts 
 
 // SetIfChanged atomically sets a hash field and publishes only if the value changed.
 // Returns true if the value was changed and published.
-func (hp *HashPublisher) SetIfChanged(ctx context.Context, field string, value any) (bool, error) {
+func (hp *HashPublisher) SetIfChanged(field string, value any) (bool, error) {
 	strVal := stringify(value)
 
 	hp.mu.Lock()
@@ -101,6 +101,7 @@ func (hp *HashPublisher) SetIfChanged(ctx context.Context, field string, value a
 		return false, nil
 	}
 
+	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.HSet(ctx, hp.hash, field, strVal)
 	pipe.Publish(ctx, hp.channel, field)
@@ -117,7 +118,7 @@ func (hp *HashPublisher) SetIfChanged(ctx context.Context, field string, value a
 
 // SetMany atomically sets multiple fields and publishes each one.
 // By default, publishes each field. Use NoPublish() to skip publishing.
-func (hp *HashPublisher) SetMany(ctx context.Context, fields map[string]any, opts ...SetOption) error {
+func (hp *HashPublisher) SetMany(fields map[string]any, opts ...SetOption) error {
 	if len(fields) == 0 {
 		return nil
 	}
@@ -127,6 +128,7 @@ func (hp *HashPublisher) SetMany(ctx context.Context, fields map[string]any, opt
 		opt(cfg)
 	}
 
+	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	for field, value := range fields {
 		strVal := stringify(value)
@@ -151,11 +153,12 @@ func (hp *HashPublisher) SetMany(ctx context.Context, fields map[string]any, opt
 // SetManyPublishOne sets multiple fields but publishes only a single notification.
 // Useful for batch updates where you only want one notification at the end.
 // The notification parameter is published as the message payload.
-func (hp *HashPublisher) SetManyPublishOne(ctx context.Context, fields map[string]any, notification string) error {
+func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification string) error {
 	if len(fields) == 0 {
 		return nil
 	}
 
+	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	for field, value := range fields {
 		pipe.HSet(ctx, hp.hash, field, stringify(value))
@@ -176,7 +179,7 @@ func (hp *HashPublisher) SetManyPublishOne(ctx context.Context, fields map[strin
 
 // SetManyIfChanged atomically sets multiple fields, publishing only changed ones.
 // Returns the list of fields that were actually changed.
-func (hp *HashPublisher) SetManyIfChanged(ctx context.Context, fields map[string]any) ([]string, error) {
+func (hp *HashPublisher) SetManyIfChanged(fields map[string]any) ([]string, error) {
 	if len(fields) == 0 {
 		return nil, nil
 	}
@@ -195,6 +198,7 @@ func (hp *HashPublisher) SetManyIfChanged(ctx context.Context, fields map[string
 		return nil, nil
 	}
 
+	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 
 	// Set all fields (even unchanged, for consistency)
@@ -226,11 +230,12 @@ func (hp *HashPublisher) SetManyIfChanged(ctx context.Context, fields map[string
 }
 
 // SetWithTimestamp atomically sets a field, its timestamp, and publishes.
-func (hp *HashPublisher) SetWithTimestamp(ctx context.Context, field string, value any) error {
+func (hp *HashPublisher) SetWithTimestamp(field string, value any) error {
 	strVal := stringify(value)
 	tsField := field + ":timestamp"
 	ts := fmt.Sprintf("%d", time.Now().UnixMilli())
 
+	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.HSet(ctx, hp.hash, field, strVal)
 	pipe.HSet(ctx, hp.hash, tsField, ts)
@@ -248,13 +253,13 @@ func (hp *HashPublisher) SetWithTimestamp(ctx context.Context, field string, val
 }
 
 // Get retrieves a field value from the hash.
-func (hp *HashPublisher) Get(ctx context.Context, field string) (string, error) {
-	return hp.client.redis.HGet(ctx, hp.hash, field).Result()
+func (hp *HashPublisher) Get(field string) (string, error) {
+	return hp.client.redis.HGet(hp.client.Context(), hp.hash, field).Result()
 }
 
 // GetAll retrieves all fields from the hash.
-func (hp *HashPublisher) GetAll(ctx context.Context) (map[string]string, error) {
-	return hp.client.redis.HGetAll(ctx, hp.hash).Result()
+func (hp *HashPublisher) GetAll() (map[string]string, error) {
+	return hp.client.redis.HGetAll(hp.client.Context(), hp.hash).Result()
 }
 
 // Hash returns the hash name.
@@ -268,7 +273,8 @@ func (hp *HashPublisher) Channel() string {
 }
 
 // Delete removes a field from the hash and publishes notification.
-func (hp *HashPublisher) Delete(ctx context.Context, field string) error {
+func (hp *HashPublisher) Delete(field string) error {
+	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.HDel(ctx, hp.hash, field)
 	pipe.Publish(ctx, hp.channel, field)
@@ -284,7 +290,8 @@ func (hp *HashPublisher) Delete(ctx context.Context, field string) error {
 }
 
 // Clear deletes the entire hash and publishes "cleared" notification.
-func (hp *HashPublisher) Clear(ctx context.Context) error {
+func (hp *HashPublisher) Clear() error {
+	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.Del(ctx, hp.hash)
 	pipe.Publish(ctx, hp.channel, "cleared")
@@ -302,7 +309,8 @@ func (hp *HashPublisher) Clear(ctx context.Context) error {
 // ReplaceAll atomically deletes all fields and sets new ones.
 // This solves the race condition in DEL + HMSET + PUBLISH patterns.
 // If fields is nil or empty, just deletes and publishes "cleared".
-func (hp *HashPublisher) ReplaceAll(ctx context.Context, fields map[string]any) error {
+func (hp *HashPublisher) ReplaceAll(fields map[string]any) error {
+	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.Del(ctx, hp.hash)
 
@@ -445,7 +453,7 @@ func (hw *HashWatcher) Start() error {
 // StartWithSync subscribes, fetches current state, calls handlers, then processes messages.
 // This ensures no messages are missed between initial fetch and subscribe.
 // Order: Subscribe (messages buffer) → HGETALL → call handlers → process buffered messages
-func (hw *HashWatcher) StartWithSync(ctx context.Context) error {
+func (hw *HashWatcher) StartWithSync() error {
 	// Subscribe first - messages will buffer in the channel
 	hw.pubsub = hw.client.redis.Subscribe(hw.client.ctx, hw.channel)
 
@@ -470,6 +478,7 @@ func (hw *HashWatcher) StartWithSync(ctx context.Context) error {
 	}
 
 	// Fetch current state and call handlers
+	ctx := hw.client.Context()
 	values, err := hw.client.redis.HGetAll(ctx, hw.hash).Result()
 	if err != nil && err != redis.Nil {
 		return fmt.Errorf("initial fetch failed: %w", err)
@@ -566,13 +575,13 @@ func (hw *HashWatcher) Stop() error {
 
 // FetchAll retrieves all current values from the hash.
 // Useful for initial state sync.
-func (hw *HashWatcher) FetchAll(ctx context.Context) (map[string]string, error) {
-	return hw.client.redis.HGetAll(ctx, hw.hash).Result()
+func (hw *HashWatcher) FetchAll() (map[string]string, error) {
+	return hw.client.redis.HGetAll(hw.client.Context(), hw.hash).Result()
 }
 
 // Fetch retrieves a specific field from the hash.
-func (hw *HashWatcher) Fetch(ctx context.Context, field string) (string, error) {
-	return hw.client.redis.HGet(ctx, hw.hash, field).Result()
+func (hw *HashWatcher) Fetch(field string) (string, error) {
+	return hw.client.redis.HGet(hw.client.Context(), hw.hash, field).Result()
 }
 
 // FaultSet manages a Redis set of fault codes with pub/sub notification.
@@ -595,7 +604,8 @@ func (c *Client) NewFaultSet(setKey, channel, payload string) *FaultSet {
 }
 
 // Add adds a fault code to the set and publishes notification.
-func (fs *FaultSet) Add(ctx context.Context, code int) error {
+func (fs *FaultSet) Add(code int) error {
+	ctx := fs.client.Context()
 	pipe := fs.client.redis.Pipeline()
 	pipe.SAdd(ctx, fs.setKey, code)
 	pipe.Publish(ctx, fs.channel, fs.payload)
@@ -604,7 +614,8 @@ func (fs *FaultSet) Add(ctx context.Context, code int) error {
 }
 
 // Remove removes a fault code from the set and publishes notification.
-func (fs *FaultSet) Remove(ctx context.Context, code int) error {
+func (fs *FaultSet) Remove(code int) error {
+	ctx := fs.client.Context()
 	pipe := fs.client.redis.Pipeline()
 	pipe.SRem(ctx, fs.setKey, code)
 	pipe.Publish(ctx, fs.channel, fs.payload)
@@ -613,17 +624,18 @@ func (fs *FaultSet) Remove(ctx context.Context, code int) error {
 }
 
 // Has checks if a fault code is present.
-func (fs *FaultSet) Has(ctx context.Context, code int) (bool, error) {
-	return fs.client.redis.SIsMember(ctx, fs.setKey, code).Result()
+func (fs *FaultSet) Has(code int) (bool, error) {
+	return fs.client.redis.SIsMember(fs.client.Context(), fs.setKey, code).Result()
 }
 
 // All returns all fault codes in the set.
-func (fs *FaultSet) All(ctx context.Context) ([]string, error) {
-	return fs.client.redis.SMembers(ctx, fs.setKey).Result()
+func (fs *FaultSet) All() ([]string, error) {
+	return fs.client.redis.SMembers(fs.client.Context(), fs.setKey).Result()
 }
 
 // Clear removes all fault codes and publishes notification.
-func (fs *FaultSet) Clear(ctx context.Context) error {
+func (fs *FaultSet) Clear() error {
+	ctx := fs.client.Context()
 	pipe := fs.client.redis.Pipeline()
 	pipe.Del(ctx, fs.setKey)
 	pipe.Publish(ctx, fs.channel, fs.payload)
@@ -633,11 +645,12 @@ func (fs *FaultSet) Clear(ctx context.Context) error {
 
 // SetMany atomically adds/removes multiple codes.
 // positive codes are added, negative codes are removed.
-func (fs *FaultSet) SetMany(ctx context.Context, codes []int) error {
+func (fs *FaultSet) SetMany(codes []int) error {
 	if len(codes) == 0 {
 		return nil
 	}
 
+	ctx := fs.client.Context()
 	pipe := fs.client.redis.Pipeline()
 	for _, code := range codes {
 		if code > 0 {
