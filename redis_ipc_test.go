@@ -327,3 +327,59 @@ func TestGracefulShutdown(t *testing.T) {
 		t.Errorf("Close took %v, expected faster shutdown", elapsed)
 	}
 }
+
+func TestWithURL(t *testing.T) {
+	tests := []struct {
+		name     string
+		url      string
+		wantAddr string
+		wantPort int
+	}{
+		{"full url", "redis://myhost:1234", "myhost", 1234},
+		{"host:port", "myhost:1234", "myhost", 1234},
+		{"just host", "myhost", "myhost", 6379},
+		{"localhost url", "redis://localhost:6379", "localhost", 6379},
+		{"no port", "redis://myhost", "myhost", 6379},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			o := defaultOptions()
+			WithURL(tt.url)(o)
+
+			if o.address != tt.wantAddr {
+				t.Errorf("address = %q, want %q", o.address, tt.wantAddr)
+			}
+			if o.port != tt.wantPort {
+				t.Errorf("port = %d, want %d", o.port, tt.wantPort)
+			}
+		})
+	}
+}
+
+func TestWithURLConnection(t *testing.T) {
+	// Test that WithURL actually connects
+	client, err := New(WithURL("redis://localhost:6379"))
+	if err != nil {
+		t.Fatalf("New() with WithURL failed: %v", err)
+	}
+	defer client.Close()
+
+	if !client.Connected() {
+		t.Error("Expected client to be connected")
+	}
+}
+
+func TestPing(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	ctx := context.Background()
+	err = client.Ping(ctx)
+	if err != nil {
+		t.Errorf("Ping() failed: %v", err)
+	}
+}

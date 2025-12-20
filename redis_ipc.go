@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -129,6 +132,33 @@ func WithOnConnect(fn func()) Option {
 // WithOnDisconnect sets a callback invoked when connection is lost
 func WithOnDisconnect(fn func(error)) Option {
 	return func(o *options) { o.onDisconnect = fn }
+}
+
+// WithURL sets the Redis server address from a URL string.
+// Supports formats: "redis://host:port", "host:port", or just "host".
+// The redis:// scheme is optional. Port defaults to 6379 if not specified.
+func WithURL(rawURL string) Option {
+	return func(o *options) {
+		// Handle bare host:port or host without scheme
+		if !strings.Contains(rawURL, "://") {
+			rawURL = "redis://" + rawURL
+		}
+
+		u, err := url.Parse(rawURL)
+		if err != nil {
+			return // Keep defaults on parse error
+		}
+
+		if u.Hostname() != "" {
+			o.address = u.Hostname()
+		}
+
+		if u.Port() != "" {
+			if port, err := strconv.Atoi(u.Port()); err == nil {
+				o.port = port
+			}
+		}
+	}
 }
 
 // Client is the main Redis IPC client
@@ -666,4 +696,9 @@ func (c *Client) Expire(ctx context.Context, key string, expiration time.Duratio
 // Raw returns the underlying go-redis client for advanced operations
 func (c *Client) Raw() *redis.Client {
 	return c.redis
+}
+
+// Ping checks if the Redis server is reachable
+func (c *Client) Ping(ctx context.Context) error {
+	return c.redis.Ping(ctx).Err()
 }

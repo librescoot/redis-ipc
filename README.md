@@ -308,8 +308,10 @@ ipc.PublishRouted(client, ctx, "events", "state", StateMsg{...})
 
 ```go
 client, err := ipc.New(
-    ipc.WithAddress("localhost"),
-    ipc.WithPort(6379),
+    ipc.WithURL("redis://localhost:6379"),  // Or just "localhost:6379" or "localhost"
+    // Or use separate address/port:
+    // ipc.WithAddress("localhost"),
+    // ipc.WithPort(6379),
     ipc.WithRetryInterval(5 * time.Second),
     ipc.WithMaxRetries(3),
     ipc.WithPoolSize(3),
@@ -347,6 +349,9 @@ client.Publish(ctx, "channel", "message")
 client.Exists(ctx, "key")
 client.Del(ctx, "key")
 client.Expire(ctx, "key", time.Hour)
+
+// Health check
+client.Ping(ctx)
 
 // Raw command
 client.Do(ctx, "PING")
