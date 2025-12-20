@@ -88,6 +88,9 @@ The LibreScoot pattern stores state in Redis hashes and notifies via pub/sub:
 // Create publisher for "vehicle" hash (publishes to "vehicle" channel)
 vehicle := client.NewHashPublisher("vehicle")
 
+// Or with a custom channel name
+vehicle := client.NewHashPublisherWithChannel("vehicle", "state")
+
 // Set field and publish atomically
 vehicle.Set(ctx, "state", "ready")
 
@@ -112,6 +115,9 @@ vehicle.SetWithTimestamp(ctx, "state", "ready")
 // Create watcher for "battery:0" hash
 watcher := client.NewHashWatcher("battery:0")
 
+// Or with a custom channel name
+watcher := client.NewHashWatcherWithChannel("battery:0", "battery")
+
 // Register field-specific handlers
 watcher.OnField("state", func(value string) error {
     log.Printf("Battery state: %s", value)
@@ -129,12 +135,20 @@ watcher.OnAny(func(field, value string) error {
     return nil
 })
 
+// Typed handler with automatic JSON decoding
+ipc.OnFieldTyped(watcher, "config", func(cfg Config) error {
+    return applyConfig(cfg)
+})
+
 // Start watching
 watcher.Start()
 defer watcher.Stop()
 
 // Fetch initial state
 all, _ := watcher.FetchAll(ctx)
+
+// Fetch a single field
+state, _ := watcher.Fetch(ctx, "state")
 ```
 
 #### StartWithSync
@@ -170,6 +184,7 @@ faults.Add(ctx, 35)     // SADD + PUBLISH
 faults.Remove(ctx, 35)  // SREM + PUBLISH
 faults.Has(ctx, 35)     // SISMEMBER
 faults.All(ctx)         // SMEMBERS
+faults.Clear(ctx)       // DEL + PUBLISH
 ```
 
 ## Redis Streams
