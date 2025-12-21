@@ -825,3 +825,167 @@ done:
 	// Cleanup
 	client.Del(hash)
 }
+
+func TestHashPublisherGetAll(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	hash := "test:getall:" + time.Now().Format(time.RFC3339Nano)
+	pub := client.NewHashPublisher(hash)
+
+	// Set multiple fields
+	err = pub.SetMany(map[string]any{
+		"field1": "value1",
+		"field2": "value2",
+		"field3": "value3",
+	})
+	if err != nil {
+		t.Fatalf("SetMany() failed: %v", err)
+	}
+
+	// Get individual fields
+	val, err := pub.Get("field1")
+	if err != nil {
+		t.Fatalf("Get(field1) failed: %v", err)
+	}
+	if val != "value1" {
+		t.Errorf("Get(field1) = %q, want value1", val)
+	}
+
+	val, err = pub.Get("field2")
+	if err != nil {
+		t.Fatalf("Get(field2) failed: %v", err)
+	}
+	if val != "value2" {
+		t.Errorf("Get(field2) = %q, want value2", val)
+	}
+
+	// Get nonexistent field
+	val, err = pub.Get("nonexistent")
+	if err == nil {
+		t.Error("Get(nonexistent) should return error")
+	}
+
+	// GetAll
+	all, err := pub.GetAll()
+	if err != nil {
+		t.Fatalf("GetAll() failed: %v", err)
+	}
+	if len(all) != 3 {
+		t.Errorf("GetAll() returned %d fields, want 3", len(all))
+	}
+	if all["field1"] != "value1" || all["field2"] != "value2" || all["field3"] != "value3" {
+		t.Errorf("GetAll() = %v, unexpected values", all)
+	}
+
+	// Cleanup
+	client.Del(hash)
+}
+
+func TestHashWatcherFetch(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	hash := "test:watcherfetch:" + time.Now().Format(time.RFC3339Nano)
+
+	// Populate hash
+	pub := client.NewHashPublisher(hash)
+	err = pub.SetMany(map[string]any{
+		"state":  "ready",
+		"charge": "75",
+	})
+	if err != nil {
+		t.Fatalf("SetMany() failed: %v", err)
+	}
+
+	watcher := client.NewHashWatcher(hash)
+
+	// Fetch single field
+	val, err := watcher.Fetch("state")
+	if err != nil {
+		t.Fatalf("Fetch(state) failed: %v", err)
+	}
+	if val != "ready" {
+		t.Errorf("Fetch(state) = %q, want ready", val)
+	}
+
+	// Fetch nonexistent field
+	_, err = watcher.Fetch("nonexistent")
+	if err == nil {
+		t.Error("Fetch(nonexistent) should return error")
+	}
+
+	// FetchAll
+	all, err := watcher.FetchAll()
+	if err != nil {
+		t.Fatalf("FetchAll() failed: %v", err)
+	}
+	if len(all) != 2 {
+		t.Errorf("FetchAll() returned %d fields, want 2", len(all))
+	}
+	if all["state"] != "ready" || all["charge"] != "75" {
+		t.Errorf("FetchAll() = %v, unexpected values", all)
+	}
+
+	// Cleanup
+	client.Del(hash)
+}
+
+func TestOnFieldTyped(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	hash := "test:onfieldtyped:" + time.Now().Format(time.RFC3339Nano)
+
+	type Config struct {
+		MaxSpeed int  `json:"max_speed"`
+		Enabled  bool `json:"enabled"`
+	}
+
+	received := make(chan Config, 1)
+
+	watcher := client.NewHashWatcher(hash)
+	OnFieldTyped(watcher, "config", func(cfg Config) error {
+		received <- cfg
+		return nil
+	})
+
+	err = watcher.Start()
+	if err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer watcher.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	// Publish JSON config
+	pub := client.NewHashPublisher(hash)
+	err = pub.Set("config", `{"max_speed":25,"enabled":true}`)
+	if err != nil {
+		t.Fatalf("Set() failed: %v", err)
+	}
+
+	select {
+	case cfg := <-received:
+		if cfg.MaxSpeed != 25 {
+			t.Errorf("MaxSpeed = %d, want 25", cfg.MaxSpeed)
+		}
+		if !cfg.Enabled {
+			t.Error("Enabled = false, want true")
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Timeout waiting for typed config")
+	}
+
+	// Cleanup
+	client.Del(hash)
+}

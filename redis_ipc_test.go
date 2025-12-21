@@ -1,6 +1,7 @@
 package redis_ipc
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -409,4 +410,43 @@ func TestHash(t *testing.T) {
 
 	// Cleanup
 	client.Del(hash)
+}
+
+func TestWithContext(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	key := "test:withctx:" + time.Now().Format(time.RFC3339Nano)
+
+	// Create a custom context
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// WithContext returns a ContextClient that uses the custom context
+	cc := client.WithContext(ctx)
+
+	// Verify Context() returns the custom context
+	if cc.Context() != ctx {
+		t.Error("ContextClient.Context() should return custom context")
+	}
+
+	// Operations should work through ContextClient
+	err = cc.Set(key, "value", 0)
+	if err != nil {
+		t.Fatalf("ContextClient.Set() failed: %v", err)
+	}
+
+	val, err := cc.Get(key)
+	if err != nil {
+		t.Fatalf("ContextClient.Get() failed: %v", err)
+	}
+	if val != "value" {
+		t.Errorf("Get() = %q, want %q", val, "value")
+	}
+
+	// Cleanup
+	client.Del(key)
 }
