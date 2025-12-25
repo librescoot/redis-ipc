@@ -261,6 +261,71 @@ func TestHashWatcherCatchAll(t *testing.T) {
 	client.Del(hash)
 }
 
+func TestHashWatcherOnEvent(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	channel := "test:hashevent:" + time.Now().Format(time.RFC3339Nano)
+
+	// Set up watcher with both OnField and OnEvent handlers
+	fieldReceived := make(chan string, 1)
+	eventReceived := make(chan struct{}, 1)
+
+	watcher := client.NewHashWatcher(channel)
+	watcher.OnField("state", func(value string) error {
+		fieldReceived <- value
+		return nil
+	})
+	watcher.OnEvent("seatbox:opened", func() error {
+		eventReceived <- struct{}{}
+		return nil
+	})
+
+	err = watcher.Start()
+	if err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer watcher.Stop()
+
+	// Give watcher time to subscribe
+	time.Sleep(100 * time.Millisecond)
+
+	// Test OnEvent: publish without setting hash field
+	_, err = client.Publish(channel, "seatbox:opened")
+	if err != nil {
+		t.Fatalf("Publish() failed: %v", err)
+	}
+
+	select {
+	case <-eventReceived:
+		// Success - event handler was called
+	case <-time.After(2 * time.Second):
+		t.Error("Timeout waiting for event notification")
+	}
+
+	// Test OnField still works: publish with hash field set
+	pub := client.NewHashPublisher(channel)
+	err = pub.Set("state", "ready")
+	if err != nil {
+		t.Fatalf("Set() failed: %v", err)
+	}
+
+	select {
+	case val := <-fieldReceived:
+		if val != "ready" {
+			t.Errorf("Received %q, want ready", val)
+		}
+	case <-time.After(2 * time.Second):
+		t.Error("Timeout waiting for field notification")
+	}
+
+	// Cleanup
+	client.Del(channel)
+}
+
 func TestFaultSet(t *testing.T) {
 	client, err := New(WithAddress("localhost"))
 	if err != nil {

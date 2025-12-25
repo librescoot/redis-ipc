@@ -340,13 +340,14 @@ func (hp *HashPublisher) ReplaceAll(fields map[string]any) error {
 // HashWatcher subscribes to a channel and fetches hash values on notification.
 // This matches the LibreScoot consumer pattern.
 type HashWatcher struct {
-	client   *Client
-	hash     string
-	channel  string
-	handlers map[string]func(value string) error
-	catchAll func(field, value string) error
-	mu       sync.RWMutex
-	pubsub   *redis.PubSub
+	client        *Client
+	hash          string
+	channel       string
+	handlers      map[string]func(value string) error
+	eventHandlers map[string]func() error
+	catchAll      func(field, value string) error
+	mu            sync.RWMutex
+	pubsub        *redis.PubSub
 
 	// Debounce support
 	debounce       time.Duration
@@ -363,6 +364,7 @@ func (c *Client) NewHashWatcher(hash string) *HashWatcher {
 		hash:           hash,
 		channel:        hash,
 		handlers:       make(map[string]func(value string) error),
+		eventHandlers:  make(map[string]func() error),
 		debounceTimers: make(map[string]*time.Timer),
 		debounceValues: make(map[string]string),
 	}
@@ -375,6 +377,7 @@ func (c *Client) NewHashWatcherWithChannel(hash, channel string) *HashWatcher {
 		hash:           hash,
 		channel:        channel,
 		handlers:       make(map[string]func(value string) error),
+		eventHandlers:  make(map[string]func() error),
 		debounceTimers: make(map[string]*time.Timer),
 		debounceValues: make(map[string]string),
 	}
@@ -394,6 +397,17 @@ func (hw *HashWatcher) SetDebounce(d time.Duration) *HashWatcher {
 func (hw *HashWatcher) OnField(field string, handler func(value string) error) *HashWatcher {
 	hw.mu.Lock()
 	hw.handlers[field] = handler
+	hw.mu.Unlock()
+	return hw
+}
+
+// OnEvent registers a handler for an event-only message.
+// Unlike OnField, this does not fetch from the hash - it fires immediately
+// when the message is received. Use for notifications that don't have
+// corresponding hash state.
+func (hw *HashWatcher) OnEvent(event string, handler func() error) *HashWatcher {
+	hw.mu.Lock()
+	hw.eventHandlers[event] = handler
 	hw.mu.Unlock()
 	return hw
 }
@@ -506,6 +520,18 @@ func (hw *HashWatcher) StartWithSync() error {
 
 // processField fetches and dispatches a field update, with optional debouncing.
 func (hw *HashWatcher) processField(field string) {
+	// Check for event-only handlers first (no hash fetch needed)
+	hw.mu.RLock()
+	eventHandler, isEvent := hw.eventHandlers[field]
+	hw.mu.RUnlock()
+
+	if isEvent {
+		if err := eventHandler(); err != nil {
+			hw.client.opts.logger.Error("event handler error", "channel", hw.channel, "event", field, "error", err)
+		}
+		return
+	}
+
 	// Fetch the value from hash
 	value, err := hw.client.redis.HGet(hw.client.ctx, hw.hash, field).Result()
 	if err != nil {
