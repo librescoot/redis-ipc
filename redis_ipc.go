@@ -668,18 +668,52 @@ func (c *Client) BRPop(timeout time.Duration, keys ...string) ([]string, error) 
 	return c.redis.BRPop(c.Context(), timeout, keys...).Result()
 }
 
-// Publish publishes a message to a channel
-func (c *Client) Publish(channel string, message interface{}) (int64, error) {
-	return c.redis.Publish(c.Context(), channel, message).Result()
+// Publish publishes a message to a channel.
+// By default, this is async (fire-and-forget) for performance.
+// Use Sync() option when you need to confirm the publish succeeded
+// or need the subscriber count.
+func (c *Client) Publish(channel string, message interface{}, opts ...SetOption) (int64, error) {
+	cfg := defaultSetConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	if cfg.sync {
+		return c.redis.Publish(c.Context(), channel, message).Result()
+	}
+
+	// Async: fire and forget
+	go func() {
+		if err := c.redis.Publish(c.Context(), channel, message).Err(); err != nil {
+			c.opts.logger.Error("async Publish failed", "channel", channel, "error", err)
+		}
+	}()
+	return 0, nil
 }
 
-// PublishTyped publishes a typed message using the client's codec
-func PublishTyped[T any](c *Client, channel string, message T) error {
+// PublishTyped publishes a typed message using the client's codec.
+// By default async; use Sync() for synchronous operation.
+func PublishTyped[T any](c *Client, channel string, message T, opts ...SetOption) error {
 	data, err := c.opts.codec.Encode(message)
 	if err != nil {
 		return fmt.Errorf("encode message: %w", err)
 	}
-	return c.redis.Publish(c.Context(), channel, data).Err()
+
+	cfg := defaultSetConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	if cfg.sync {
+		return c.redis.Publish(c.Context(), channel, data).Err()
+	}
+
+	go func() {
+		if err := c.redis.Publish(c.Context(), channel, data).Err(); err != nil {
+			c.opts.logger.Error("async PublishTyped failed", "channel", channel, "error", err)
+		}
+	}()
+	return nil
 }
 
 // SendRequest sends a typed message to a queue
