@@ -168,6 +168,7 @@ type Client struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	wg          sync.WaitGroup
+	asyncWg     sync.WaitGroup // tracks fire-and-forget goroutines
 	connected   bool
 	connMu      sync.RWMutex
 	subGroups   sync.Map
@@ -299,6 +300,20 @@ func (c *Client) Close() error {
 func (c *Client) CloseWithTimeout(timeout time.Duration) error {
 	c.cancel()
 
+	// Wait for fire-and-forget goroutines to complete before closing Redis,
+	// so async Set/Publish operations can finish their pipeline execution.
+	asyncDone := make(chan struct{})
+	go func() {
+		c.asyncWg.Wait()
+		close(asyncDone)
+	}()
+
+	select {
+	case <-asyncDone:
+	case <-time.After(timeout):
+		c.opts.logger.Warn("async operations timeout during shutdown", "timeout", timeout)
+	}
+
 	// Close the Redis connection to unblock PubSub subscription goroutines
 	// that are waiting on channel reads. Context cancellation alone does not
 	// close PubSub channels; closing the underlying connection does.
@@ -363,6 +378,7 @@ func (s *Subscription[T]) start() error {
 	case <-subscribed:
 		return nil
 	case <-time.After(5 * time.Second):
+		s.pubsub.Close()
 		return fmt.Errorf("subscription timeout for channel %s", s.channel)
 	}
 }
@@ -536,6 +552,7 @@ func (r *Router) Start() error {
 	case <-subscribed:
 		return nil
 	case <-time.After(5 * time.Second):
+		r.pubsub.Close()
 		return fmt.Errorf("router subscription timeout for channel %s", r.channel)
 	}
 }
@@ -688,8 +705,10 @@ func (c *Client) Publish(channel string, message interface{}, opts ...SetOption)
 	}
 
 	// Async: fire and forget
+	c.asyncWg.Add(1)
 	go func() {
-		if err := c.redis.Publish(c.Context(), channel, message).Err(); err != nil {
+		defer c.asyncWg.Done()
+		if err := c.redis.Publish(context.Background(), channel, message).Err(); err != nil {
 			c.opts.logger.Error("async Publish failed", "channel", channel, "error", err)
 		}
 	}()
@@ -713,8 +732,10 @@ func PublishTyped[T any](c *Client, channel string, message T, opts ...SetOption
 		return c.redis.Publish(c.Context(), channel, data).Err()
 	}
 
+	c.asyncWg.Add(1)
 	go func() {
-		if err := c.redis.Publish(c.Context(), channel, data).Err(); err != nil {
+		defer c.asyncWg.Done()
+		if err := c.redis.Publish(context.Background(), channel, data).Err(); err != nil {
 			c.opts.logger.Error("async PublishTyped failed", "channel", channel, "error", err)
 		}
 	}()

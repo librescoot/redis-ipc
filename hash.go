@@ -1,6 +1,7 @@
 package redis_ipc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -99,8 +100,10 @@ func (hp *HashPublisher) Set(field string, value any, opts ...SetOption) error {
 	}
 
 	// Async: fire and forget
+	hp.client.asyncWg.Add(1)
 	go func() {
-		if _, err := pipe.Exec(ctx); err != nil {
+		defer hp.client.asyncWg.Done()
+		if _, err := pipe.Exec(context.Background()); err != nil {
 			hp.client.opts.logger.Error("async Set failed", "hash", hp.hash, "field", field, "error", err)
 		}
 	}()
@@ -172,8 +175,10 @@ func (hp *HashPublisher) SetMany(fields map[string]any, opts ...SetOption) error
 	}
 
 	// Async: fire and forget
+	hp.client.asyncWg.Add(1)
 	go func() {
-		if _, err := pipe.Exec(ctx); err != nil {
+		defer hp.client.asyncWg.Done()
+		if _, err := pipe.Exec(context.Background()); err != nil {
 			hp.client.opts.logger.Error("async SetMany failed", "hash", hp.hash, "error", err)
 		}
 	}()
@@ -214,8 +219,10 @@ func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification s
 	}
 
 	// Async: fire and forget
+	hp.client.asyncWg.Add(1)
 	go func() {
-		if _, err := pipe.Exec(ctx); err != nil {
+		defer hp.client.asyncWg.Done()
+		if _, err := pipe.Exec(context.Background()); err != nil {
 			hp.client.opts.logger.Error("async SetManyPublishOne failed", "hash", hp.hash, "error", err)
 		}
 	}()
@@ -304,8 +311,10 @@ func (hp *HashPublisher) SetWithTimestamp(field string, value any, opts ...SetOp
 	}
 
 	// Async: fire and forget
+	hp.client.asyncWg.Add(1)
 	go func() {
-		if _, err := pipe.Exec(ctx); err != nil {
+		defer hp.client.asyncWg.Done()
+		if _, err := pipe.Exec(context.Background()); err != nil {
 			hp.client.opts.logger.Error("async SetWithTimestamp failed", "hash", hp.hash, "field", field, "error", err)
 		}
 	}()
@@ -356,8 +365,10 @@ func (hp *HashPublisher) Delete(field string, opts ...SetOption) error {
 	}
 
 	// Async: fire and forget
+	hp.client.asyncWg.Add(1)
 	go func() {
-		if _, err := pipe.Exec(ctx); err != nil {
+		defer hp.client.asyncWg.Done()
+		if _, err := pipe.Exec(context.Background()); err != nil {
 			hp.client.opts.logger.Error("async Delete failed", "hash", hp.hash, "field", field, "error", err)
 		}
 	}()
@@ -388,8 +399,10 @@ func (hp *HashPublisher) Clear(opts ...SetOption) error {
 	}
 
 	// Async: fire and forget
+	hp.client.asyncWg.Add(1)
 	go func() {
-		if _, err := pipe.Exec(ctx); err != nil {
+		defer hp.client.asyncWg.Done()
+		if _, err := pipe.Exec(context.Background()); err != nil {
 			hp.client.opts.logger.Error("async Clear failed", "hash", hp.hash, "error", err)
 		}
 	}()
@@ -433,8 +446,10 @@ func (hp *HashPublisher) ReplaceAll(fields map[string]any, opts ...SetOption) er
 	}
 
 	// Async: fire and forget
+	hp.client.asyncWg.Add(1)
 	go func() {
-		if _, err := pipe.Exec(ctx); err != nil {
+		defer hp.client.asyncWg.Done()
+		if _, err := pipe.Exec(context.Background()); err != nil {
 			hp.client.opts.logger.Error("async ReplaceAll failed", "hash", hp.hash, "error", err)
 		}
 	}()

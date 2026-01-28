@@ -173,7 +173,10 @@ func (sc *StreamConsumer) Start(startID string) error {
 		ctx := sc.client.Context()
 		err := sc.client.redis.XGroupCreateMkStream(ctx, sc.stream, sc.group, "0").Err()
 		if err != nil && err.Error() != "BUSYGROUP Consumer Group name already exists" {
-			sc.client.opts.logger.Warn("failed to create consumer group", "error", err)
+			sc.mu.Lock()
+			sc.running = false
+			sc.mu.Unlock()
+			return fmt.Errorf("create consumer group %s: %w", sc.group, err)
 		}
 	}
 
