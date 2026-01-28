@@ -70,6 +70,30 @@ func (c *Client) NewHashPublisherWithChannel(hash, channel string) *HashPublishe
 	}
 }
 
+// revertCache restores a single field to its previous value after a failed write.
+func (hp *HashPublisher) revertCache(field, prev string, hadPrev bool) {
+	hp.mu.Lock()
+	if hadPrev {
+		hp.previous[field] = prev
+	} else {
+		delete(hp.previous, field)
+	}
+	hp.mu.Unlock()
+}
+
+// revertCacheMany restores multiple fields to their previous values after a failed write.
+func (hp *HashPublisher) revertCacheMany(snapshot map[string]string, fields map[string]any) {
+	hp.mu.Lock()
+	for field := range fields {
+		if prev, ok := snapshot[field]; ok {
+			hp.previous[field] = prev
+		} else {
+			delete(hp.previous, field)
+		}
+	}
+	hp.mu.Unlock()
+}
+
 // Set atomically sets a hash field and publishes the field name.
 // By default, this is async (fire-and-forget) for performance.
 // Use Sync() option to wait for Redis confirmation.
@@ -82,8 +106,9 @@ func (hp *HashPublisher) Set(field string, value any, opts ...SetOption) error {
 
 	strVal := stringify(value)
 
-	// Update local cache optimistically
+	// Update local cache optimistically, saving previous for rollback
 	hp.mu.Lock()
+	prev, hadPrev := hp.previous[field]
 	hp.previous[field] = strVal
 	hp.mu.Unlock()
 
@@ -96,6 +121,9 @@ func (hp *HashPublisher) Set(field string, value any, opts ...SetOption) error {
 
 	if cfg.sync {
 		_, err := pipe.Exec(ctx)
+		if err != nil {
+			hp.revertCache(field, prev, hadPrev)
+		}
 		return err
 	}
 
@@ -104,6 +132,7 @@ func (hp *HashPublisher) Set(field string, value any, opts ...SetOption) error {
 	go func() {
 		defer hp.client.asyncWg.Done()
 		if _, err := pipe.Exec(context.Background()); err != nil {
+			hp.revertCache(field, prev, hadPrev)
 			hp.client.opts.logger.Error("async Set failed", "hash", hp.hash, "field", field, "error", err)
 		}
 	}()
@@ -152,8 +181,14 @@ func (hp *HashPublisher) SetMany(fields map[string]any, opts ...SetOption) error
 		opt(cfg)
 	}
 
-	// Update local cache optimistically
+	// Snapshot previous values for rollback
 	hp.mu.Lock()
+	snapshot := make(map[string]string, len(fields))
+	for field := range fields {
+		if prev, ok := hp.previous[field]; ok {
+			snapshot[field] = prev
+		}
+	}
 	for field, value := range fields {
 		hp.previous[field] = stringify(value)
 	}
@@ -171,6 +206,9 @@ func (hp *HashPublisher) SetMany(fields map[string]any, opts ...SetOption) error
 
 	if cfg.sync {
 		_, err := pipe.Exec(ctx)
+		if err != nil {
+			hp.revertCacheMany(snapshot, fields)
+		}
 		return err
 	}
 
@@ -179,6 +217,7 @@ func (hp *HashPublisher) SetMany(fields map[string]any, opts ...SetOption) error
 	go func() {
 		defer hp.client.asyncWg.Done()
 		if _, err := pipe.Exec(context.Background()); err != nil {
+			hp.revertCacheMany(snapshot, fields)
 			hp.client.opts.logger.Error("async SetMany failed", "hash", hp.hash, "error", err)
 		}
 	}()
@@ -199,8 +238,14 @@ func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification s
 		opt(cfg)
 	}
 
-	// Update local cache optimistically
+	// Snapshot previous values for rollback
 	hp.mu.Lock()
+	snapshot := make(map[string]string, len(fields))
+	for field := range fields {
+		if prev, ok := hp.previous[field]; ok {
+			snapshot[field] = prev
+		}
+	}
 	for field, value := range fields {
 		hp.previous[field] = stringify(value)
 	}
@@ -215,6 +260,9 @@ func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification s
 
 	if cfg.sync {
 		_, err := pipe.Exec(ctx)
+		if err != nil {
+			hp.revertCacheMany(snapshot, fields)
+		}
 		return err
 	}
 
@@ -223,6 +271,7 @@ func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification s
 	go func() {
 		defer hp.client.asyncWg.Done()
 		if _, err := pipe.Exec(context.Background()); err != nil {
+			hp.revertCacheMany(snapshot, fields)
 			hp.client.opts.logger.Error("async SetManyPublishOne failed", "hash", hp.hash, "error", err)
 		}
 	}()
@@ -293,11 +342,18 @@ func (hp *HashPublisher) SetWithTimestamp(field string, value any, opts ...SetOp
 	tsField := field + ":timestamp"
 	ts := fmt.Sprintf("%d", time.Now().UnixMilli())
 
-	// Update local cache optimistically
+	// Snapshot previous values for rollback
 	hp.mu.Lock()
+	prevVal, hadVal := hp.previous[field]
+	prevTs, hadTs := hp.previous[tsField]
 	hp.previous[field] = strVal
 	hp.previous[tsField] = ts
 	hp.mu.Unlock()
+
+	revert := func() {
+		hp.revertCache(field, prevVal, hadVal)
+		hp.revertCache(tsField, prevTs, hadTs)
+	}
 
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
@@ -307,6 +363,9 @@ func (hp *HashPublisher) SetWithTimestamp(field string, value any, opts ...SetOp
 
 	if cfg.sync {
 		_, err := pipe.Exec(ctx)
+		if err != nil {
+			revert()
+		}
 		return err
 	}
 
@@ -315,6 +374,7 @@ func (hp *HashPublisher) SetWithTimestamp(field string, value any, opts ...SetOp
 	go func() {
 		defer hp.client.asyncWg.Done()
 		if _, err := pipe.Exec(context.Background()); err != nil {
+			revert()
 			hp.client.opts.logger.Error("async SetWithTimestamp failed", "hash", hp.hash, "field", field, "error", err)
 		}
 	}()
@@ -349,8 +409,9 @@ func (hp *HashPublisher) Delete(field string, opts ...SetOption) error {
 		opt(cfg)
 	}
 
-	// Update local cache optimistically
+	// Snapshot previous value for rollback
 	hp.mu.Lock()
+	prev, hadPrev := hp.previous[field]
 	delete(hp.previous, field)
 	hp.mu.Unlock()
 
@@ -361,6 +422,9 @@ func (hp *HashPublisher) Delete(field string, opts ...SetOption) error {
 
 	if cfg.sync {
 		_, err := pipe.Exec(ctx)
+		if err != nil {
+			hp.revertCache(field, prev, hadPrev)
+		}
 		return err
 	}
 
@@ -369,6 +433,7 @@ func (hp *HashPublisher) Delete(field string, opts ...SetOption) error {
 	go func() {
 		defer hp.client.asyncWg.Done()
 		if _, err := pipe.Exec(context.Background()); err != nil {
+			hp.revertCache(field, prev, hadPrev)
 			hp.client.opts.logger.Error("async Delete failed", "hash", hp.hash, "field", field, "error", err)
 		}
 	}()
@@ -383,8 +448,9 @@ func (hp *HashPublisher) Clear(opts ...SetOption) error {
 		opt(cfg)
 	}
 
-	// Update local cache optimistically
+	// Snapshot previous cache for rollback
 	hp.mu.Lock()
+	snapshot := hp.previous
 	hp.previous = make(map[string]string)
 	hp.mu.Unlock()
 
@@ -395,6 +461,11 @@ func (hp *HashPublisher) Clear(opts ...SetOption) error {
 
 	if cfg.sync {
 		_, err := pipe.Exec(ctx)
+		if err != nil {
+			hp.mu.Lock()
+			hp.previous = snapshot
+			hp.mu.Unlock()
+		}
 		return err
 	}
 
@@ -403,6 +474,9 @@ func (hp *HashPublisher) Clear(opts ...SetOption) error {
 	go func() {
 		defer hp.client.asyncWg.Done()
 		if _, err := pipe.Exec(context.Background()); err != nil {
+			hp.mu.Lock()
+			hp.previous = snapshot
+			hp.mu.Unlock()
 			hp.client.opts.logger.Error("async Clear failed", "hash", hp.hash, "error", err)
 		}
 	}()
@@ -419,8 +493,9 @@ func (hp *HashPublisher) ReplaceAll(fields map[string]any, opts ...SetOption) er
 		opt(cfg)
 	}
 
-	// Update local cache optimistically
+	// Snapshot previous cache for rollback
 	hp.mu.Lock()
+	snapshot := hp.previous
 	hp.previous = make(map[string]string)
 	for field, value := range fields {
 		hp.previous[field] = stringify(value)
@@ -442,6 +517,11 @@ func (hp *HashPublisher) ReplaceAll(fields map[string]any, opts ...SetOption) er
 
 	if cfg.sync {
 		_, err := pipe.Exec(ctx)
+		if err != nil {
+			hp.mu.Lock()
+			hp.previous = snapshot
+			hp.mu.Unlock()
+		}
 		return err
 	}
 
@@ -450,6 +530,9 @@ func (hp *HashPublisher) ReplaceAll(fields map[string]any, opts ...SetOption) er
 	go func() {
 		defer hp.client.asyncWg.Done()
 		if _, err := pipe.Exec(context.Background()); err != nil {
+			hp.mu.Lock()
+			hp.previous = snapshot
+			hp.mu.Unlock()
 			hp.client.opts.logger.Error("async ReplaceAll failed", "hash", hp.hash, "error", err)
 		}
 	}()
@@ -591,11 +674,15 @@ func (hw *HashWatcher) StartWithSync() error {
 	hw.pubsub = hw.client.redis.Subscribe(hw.client.ctx, hw.channel)
 
 	subscribed := make(chan struct{})
+	synced := make(chan struct{})
 	hw.client.wg.Add(1)
 	go func() {
 		defer hw.client.wg.Done()
 		ch := hw.pubsub.Channel()
 		close(subscribed)
+
+		// Wait for initial sync to complete before processing messages
+		<-synced
 
 		// Process messages (including any buffered during initial sync)
 		for msg := range ch {
@@ -607,6 +694,7 @@ func (hw *HashWatcher) StartWithSync() error {
 	select {
 	case <-subscribed:
 	case <-time.After(5 * time.Second):
+		close(synced)
 		return fmt.Errorf("subscription timeout for channel %s", hw.channel)
 	}
 
@@ -614,6 +702,7 @@ func (hw *HashWatcher) StartWithSync() error {
 	ctx := hw.client.Context()
 	values, err := hw.client.redis.HGetAll(ctx, hw.hash).Result()
 	if err != nil && err != redis.Nil {
+		close(synced)
 		return fmt.Errorf("initial fetch failed: %w", err)
 	}
 
@@ -633,6 +722,9 @@ func (hw *HashWatcher) StartWithSync() error {
 			}
 		}
 	}
+
+	// Ungate message processing now that initial sync is done
+	close(synced)
 
 	return nil
 }
@@ -680,9 +772,17 @@ func (hw *HashWatcher) processFieldDebounced(field, value string) {
 		timer.Stop()
 	}
 
-	// Create new timer
-	hw.debounceTimers[field] = time.AfterFunc(hw.debounce, func() {
+	// Create new timer. Use a pointer so the closure can reference it
+	// after assignment to check if it's still the current timer.
+	var t *time.Timer
+	t = time.AfterFunc(hw.debounce, func() {
 		hw.debounceMu.Lock()
+		// Verify this timer is still the current one for this field.
+		// A newer update may have replaced it if Stop() lost the race.
+		if hw.debounceTimers[field] != t {
+			hw.debounceMu.Unlock()
+			return
+		}
 		v := hw.debounceValues[field]
 		delete(hw.debounceTimers, field)
 		delete(hw.debounceValues, field)
@@ -690,6 +790,7 @@ func (hw *HashWatcher) processFieldDebounced(field, value string) {
 
 		hw.dispatchField(field, v)
 	})
+	hw.debounceTimers[field] = t
 }
 
 // dispatchField calls the appropriate handler for a field.
