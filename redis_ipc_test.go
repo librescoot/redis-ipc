@@ -394,8 +394,8 @@ func TestHash(t *testing.T) {
 		t.Error("Hash() should return cached instance")
 	}
 
-	// Verify it works
-	err = pub1.Set("field", "value")
+	// Verify it works (use Sync since we immediately read)
+	err = pub1.Set("field", "value", Sync())
 	if err != nil {
 		t.Fatalf("Set() failed: %v", err)
 	}

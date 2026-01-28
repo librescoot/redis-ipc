@@ -16,8 +16,8 @@ func TestHashPublisher(t *testing.T) {
 
 	pub := client.NewHashPublisher(hash)
 
-	// Set a field
-	err = pub.Set("state", "ready")
+	// Set a field (use Sync since we immediately read it)
+	err = pub.Set("state", "ready", Sync())
 	if err != nil {
 		t.Fatalf("Set() failed: %v", err)
 	}
@@ -94,7 +94,8 @@ func TestHashPublisherSetMany(t *testing.T) {
 		"voltage": "52000",
 	}
 
-	err = pub.SetMany(fields)
+	// Use Sync since we immediately read
+	err = pub.SetMany(fields, Sync())
 	if err != nil {
 		t.Fatalf("SetMany() failed: %v", err)
 	}
@@ -430,8 +431,8 @@ func TestHashPublisherSetWithTimestamp(t *testing.T) {
 
 	pub := client.NewHashPublisher(hash)
 
-	// Set with timestamp
-	err = pub.SetWithTimestamp("state", "ready")
+	// Set with timestamp (use Sync since we immediately read)
+	err = pub.SetWithTimestamp("state", "ready", Sync())
 	if err != nil {
 		t.Fatalf("SetWithTimestamp() failed: %v", err)
 	}
@@ -462,12 +463,12 @@ func TestHashWatcherStartWithSync(t *testing.T) {
 
 	hash := "test:hashsync:" + time.Now().Format(time.RFC3339Nano)
 
-	// Pre-populate the hash with initial values
+	// Pre-populate the hash with initial values (use Sync to ensure data is there)
 	pub := client.NewHashPublisher(hash)
 	err = pub.SetMany(map[string]any{
 		"state":  "ready",
 		"charge": "85",
-	})
+	}, Sync())
 	if err != nil {
 		t.Fatalf("SetMany() failed: %v", err)
 	}
@@ -605,17 +606,17 @@ func TestHashPublisherDelete(t *testing.T) {
 
 	pub := client.NewHashPublisher(hash)
 
-	// Set some fields
+	// Set some fields (use Sync since we immediately read)
 	err = pub.SetMany(map[string]any{
 		"field1": "value1",
 		"field2": "value2",
-	})
+	}, Sync())
 	if err != nil {
 		t.Fatalf("SetMany() failed: %v", err)
 	}
 
-	// Delete one field
-	err = pub.Delete("field1")
+	// Delete one field (use Sync since we immediately read)
+	err = pub.Delete("field1", Sync())
 	if err != nil {
 		t.Fatalf("Delete() failed: %v", err)
 	}
@@ -647,17 +648,17 @@ func TestHashPublisherClear(t *testing.T) {
 
 	pub := client.NewHashPublisher(hash)
 
-	// Set some fields
+	// Set some fields (use Sync since we immediately read)
 	err = pub.SetMany(map[string]any{
 		"field1": "value1",
 		"field2": "value2",
-	})
+	}, Sync())
 	if err != nil {
 		t.Fatalf("SetMany() failed: %v", err)
 	}
 
-	// Clear the hash
-	err = pub.Clear()
+	// Clear the hash (use Sync since we immediately read)
+	err = pub.Clear(Sync())
 	if err != nil {
 		t.Fatalf("Clear() failed: %v", err)
 	}
@@ -686,20 +687,20 @@ func TestHashPublisherReplaceAll(t *testing.T) {
 
 	pub := client.NewHashPublisher(hash)
 
-	// Set initial fields
+	// Set initial fields (use Sync since we immediately read)
 	err = pub.SetMany(map[string]any{
 		"old1": "value1",
 		"old2": "value2",
-	})
+	}, Sync())
 	if err != nil {
 		t.Fatalf("SetMany() failed: %v", err)
 	}
 
-	// Replace all with new fields
+	// Replace all with new fields (use Sync since we immediately read)
 	err = pub.ReplaceAll(map[string]any{
 		"new1": "newvalue1",
 		"new2": "newvalue2",
-	})
+	}, Sync())
 	if err != nil {
 		t.Fatalf("ReplaceAll() failed: %v", err)
 	}
@@ -723,7 +724,7 @@ func TestHashPublisherReplaceAll(t *testing.T) {
 	}
 
 	// Test ReplaceAll with nil (should clear)
-	err = pub.ReplaceAll(nil)
+	err = pub.ReplaceAll(nil, Sync())
 	if err != nil {
 		t.Fatalf("ReplaceAll(nil) failed: %v", err)
 	}
@@ -757,8 +758,8 @@ func TestHashPublisherNoPublish(t *testing.T) {
 	ch := pubsub.Channel()
 	time.Sleep(100 * time.Millisecond) // Wait for subscription
 
-	// Set with NoPublish
-	err = pub.Set("field1", "value1", NoPublish())
+	// Set with NoPublish and Sync (since we immediately read)
+	err = pub.Set("field1", "value1", NoPublish(), Sync())
 	if err != nil {
 		t.Fatalf("Set() with NoPublish failed: %v", err)
 	}
@@ -801,11 +802,11 @@ func TestHashPublisherSetManyNoPublish(t *testing.T) {
 	ch := pubsub.Channel()
 	time.Sleep(100 * time.Millisecond)
 
-	// SetMany with NoPublish
+	// SetMany with NoPublish and Sync (since we immediately read)
 	err = pub.SetMany(map[string]any{
 		"field1": "value1",
 		"field2": "value2",
-	}, NoPublish())
+	}, NoPublish(), Sync())
 	if err != nil {
 		t.Fatalf("SetMany() with NoPublish failed: %v", err)
 	}
@@ -848,12 +849,12 @@ func TestHashPublisherSetManyPublishOne(t *testing.T) {
 	ch := pubsub.Channel()
 	time.Sleep(100 * time.Millisecond)
 
-	// SetManyPublishOne
+	// SetManyPublishOne (use Sync since we immediately read)
 	err = pub.SetManyPublishOne(map[string]any{
 		"field1": "value1",
 		"field2": "value2",
 		"field3": "value3",
-	}, "batch-update")
+	}, "batch-update", Sync())
 	if err != nil {
 		t.Fatalf("SetManyPublishOne() failed: %v", err)
 	}
@@ -901,12 +902,12 @@ func TestHashPublisherGetAll(t *testing.T) {
 	hash := "test:getall:" + time.Now().Format(time.RFC3339Nano)
 	pub := client.NewHashPublisher(hash)
 
-	// Set multiple fields
+	// Set multiple fields (use Sync since we immediately read)
 	err = pub.SetMany(map[string]any{
 		"field1": "value1",
 		"field2": "value2",
 		"field3": "value3",
-	})
+	}, Sync())
 	if err != nil {
 		t.Fatalf("SetMany() failed: %v", err)
 	}
@@ -959,12 +960,12 @@ func TestHashWatcherFetch(t *testing.T) {
 
 	hash := "test:watcherfetch:" + time.Now().Format(time.RFC3339Nano)
 
-	// Populate hash
+	// Populate hash (use Sync since we immediately read)
 	pub := client.NewHashPublisher(hash)
 	err = pub.SetMany(map[string]any{
 		"state":  "ready",
 		"charge": "75",
-	})
+	}, Sync())
 	if err != nil {
 		t.Fatalf("SetMany() failed: %v", err)
 	}

@@ -15,16 +15,24 @@ type SetOption func(*setConfig)
 
 type setConfig struct {
 	publish bool
+	sync    bool
 }
 
 func defaultSetConfig() *setConfig {
-	return &setConfig{publish: true}
+	return &setConfig{publish: true, sync: false}
 }
 
 // NoPublish prevents publishing after the set operation.
 // Use when you want to update state without notifying subscribers.
 func NoPublish() SetOption {
 	return func(c *setConfig) { c.publish = false }
+}
+
+// Sync makes the operation synchronous, blocking until Redis confirms.
+// By default, Set/SetMany are async (fire-and-forget) for performance.
+// Use Sync() when you need to confirm the write succeeded.
+func Sync() SetOption {
+	return func(c *setConfig) { c.sync = true }
 }
 
 // HashPublisher provides atomic HSET + PUBLISH with change detection.
@@ -62,7 +70,9 @@ func (c *Client) NewHashPublisherWithChannel(hash, channel string) *HashPublishe
 }
 
 // Set atomically sets a hash field and publishes the field name.
-// By default, always publishes. Use NoPublish() to skip publishing.
+// By default, this is async (fire-and-forget) for performance.
+// Use Sync() option to wait for Redis confirmation.
+// Use NoPublish() to skip publishing.
 func (hp *HashPublisher) Set(field string, value any, opts ...SetOption) error {
 	cfg := defaultSetConfig()
 	for _, opt := range opts {
@@ -70,22 +80,31 @@ func (hp *HashPublisher) Set(field string, value any, opts ...SetOption) error {
 	}
 
 	strVal := stringify(value)
-	ctx := hp.client.Context()
 
+	// Update local cache optimistically
+	hp.mu.Lock()
+	hp.previous[field] = strVal
+	hp.mu.Unlock()
+
+	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.HSet(ctx, hp.hash, field, strVal)
 	if cfg.publish {
 		pipe.Publish(ctx, hp.channel, field)
 	}
-	_, err := pipe.Exec(ctx)
 
-	if err == nil {
-		hp.mu.Lock()
-		hp.previous[field] = strVal
-		hp.mu.Unlock()
+	if cfg.sync {
+		_, err := pipe.Exec(ctx)
+		return err
 	}
 
-	return err
+	// Async: fire and forget
+	go func() {
+		if _, err := pipe.Exec(ctx); err != nil {
+			hp.client.opts.logger.Error("async Set failed", "hash", hp.hash, "field", field, "error", err)
+		}
+	}()
+	return nil
 }
 
 // SetIfChanged atomically sets a hash field and publishes only if the value changed.
@@ -117,7 +136,9 @@ func (hp *HashPublisher) SetIfChanged(field string, value any) (bool, error) {
 }
 
 // SetMany atomically sets multiple fields and publishes each one.
-// By default, publishes each field. Use NoPublish() to skip publishing.
+// By default, this is async (fire-and-forget) for performance.
+// Use Sync() option to wait for Redis confirmation.
+// Use NoPublish() to skip publishing.
 func (hp *HashPublisher) SetMany(fields map[string]any, opts ...SetOption) error {
 	if len(fields) == 0 {
 		return nil
@@ -128,6 +149,13 @@ func (hp *HashPublisher) SetMany(fields map[string]any, opts ...SetOption) error
 		opt(cfg)
 	}
 
+	// Update local cache optimistically
+	hp.mu.Lock()
+	for field, value := range fields {
+		hp.previous[field] = stringify(value)
+	}
+	hp.mu.Unlock()
+
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	for field, value := range fields {
@@ -137,26 +165,41 @@ func (hp *HashPublisher) SetMany(fields map[string]any, opts ...SetOption) error
 			pipe.Publish(ctx, hp.channel, field)
 		}
 	}
-	_, err := pipe.Exec(ctx)
 
-	if err == nil {
-		hp.mu.Lock()
-		for field, value := range fields {
-			hp.previous[field] = stringify(value)
-		}
-		hp.mu.Unlock()
+	if cfg.sync {
+		_, err := pipe.Exec(ctx)
+		return err
 	}
 
-	return err
+	// Async: fire and forget
+	go func() {
+		if _, err := pipe.Exec(ctx); err != nil {
+			hp.client.opts.logger.Error("async SetMany failed", "hash", hp.hash, "error", err)
+		}
+	}()
+	return nil
 }
 
 // SetManyPublishOne sets multiple fields but publishes only a single notification.
 // Useful for batch updates where you only want one notification at the end.
 // The notification parameter is published as the message payload.
-func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification string) error {
+// By default, this is async (fire-and-forget). Use Sync() for confirmation.
+func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification string, opts ...SetOption) error {
 	if len(fields) == 0 {
 		return nil
 	}
+
+	cfg := defaultSetConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// Update local cache optimistically
+	hp.mu.Lock()
+	for field, value := range fields {
+		hp.previous[field] = stringify(value)
+	}
+	hp.mu.Unlock()
 
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
@@ -164,17 +207,19 @@ func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification s
 		pipe.HSet(ctx, hp.hash, field, stringify(value))
 	}
 	pipe.Publish(ctx, hp.channel, notification)
-	_, err := pipe.Exec(ctx)
 
-	if err == nil {
-		hp.mu.Lock()
-		for field, value := range fields {
-			hp.previous[field] = stringify(value)
-		}
-		hp.mu.Unlock()
+	if cfg.sync {
+		_, err := pipe.Exec(ctx)
+		return err
 	}
 
-	return err
+	// Async: fire and forget
+	go func() {
+		if _, err := pipe.Exec(ctx); err != nil {
+			hp.client.opts.logger.Error("async SetManyPublishOne failed", "hash", hp.hash, "error", err)
+		}
+	}()
+	return nil
 }
 
 // SetManyIfChanged atomically sets multiple fields, publishing only changed ones.
@@ -230,26 +275,41 @@ func (hp *HashPublisher) SetManyIfChanged(fields map[string]any) ([]string, erro
 }
 
 // SetWithTimestamp atomically sets a field, its timestamp, and publishes.
-func (hp *HashPublisher) SetWithTimestamp(field string, value any) error {
+// By default, this is async (fire-and-forget). Use Sync() for confirmation.
+func (hp *HashPublisher) SetWithTimestamp(field string, value any, opts ...SetOption) error {
+	cfg := defaultSetConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
 	strVal := stringify(value)
 	tsField := field + ":timestamp"
 	ts := fmt.Sprintf("%d", time.Now().UnixMilli())
+
+	// Update local cache optimistically
+	hp.mu.Lock()
+	hp.previous[field] = strVal
+	hp.previous[tsField] = ts
+	hp.mu.Unlock()
 
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.HSet(ctx, hp.hash, field, strVal)
 	pipe.HSet(ctx, hp.hash, tsField, ts)
 	pipe.Publish(ctx, hp.channel, field)
-	_, err := pipe.Exec(ctx)
 
-	if err == nil {
-		hp.mu.Lock()
-		hp.previous[field] = strVal
-		hp.previous[tsField] = ts
-		hp.mu.Unlock()
+	if cfg.sync {
+		_, err := pipe.Exec(ctx)
+		return err
 	}
 
-	return err
+	// Async: fire and forget
+	go func() {
+		if _, err := pipe.Exec(ctx); err != nil {
+			hp.client.opts.logger.Error("async SetWithTimestamp failed", "hash", hp.hash, "field", field, "error", err)
+		}
+	}()
+	return nil
 }
 
 // Get retrieves a field value from the hash.
@@ -273,43 +333,87 @@ func (hp *HashPublisher) Channel() string {
 }
 
 // Delete removes a field from the hash and publishes notification.
-func (hp *HashPublisher) Delete(field string) error {
+// By default, this is async (fire-and-forget). Use Sync() for confirmation.
+func (hp *HashPublisher) Delete(field string, opts ...SetOption) error {
+	cfg := defaultSetConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// Update local cache optimistically
+	hp.mu.Lock()
+	delete(hp.previous, field)
+	hp.mu.Unlock()
+
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.HDel(ctx, hp.hash, field)
 	pipe.Publish(ctx, hp.channel, field)
-	_, err := pipe.Exec(ctx)
 
-	if err == nil {
-		hp.mu.Lock()
-		delete(hp.previous, field)
-		hp.mu.Unlock()
+	if cfg.sync {
+		_, err := pipe.Exec(ctx)
+		return err
 	}
 
-	return err
+	// Async: fire and forget
+	go func() {
+		if _, err := pipe.Exec(ctx); err != nil {
+			hp.client.opts.logger.Error("async Delete failed", "hash", hp.hash, "field", field, "error", err)
+		}
+	}()
+	return nil
 }
 
 // Clear deletes the entire hash and publishes "cleared" notification.
-func (hp *HashPublisher) Clear() error {
+// By default, this is async (fire-and-forget). Use Sync() for confirmation.
+func (hp *HashPublisher) Clear(opts ...SetOption) error {
+	cfg := defaultSetConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// Update local cache optimistically
+	hp.mu.Lock()
+	hp.previous = make(map[string]string)
+	hp.mu.Unlock()
+
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.Del(ctx, hp.hash)
 	pipe.Publish(ctx, hp.channel, "cleared")
-	_, err := pipe.Exec(ctx)
 
-	if err == nil {
-		hp.mu.Lock()
-		hp.previous = make(map[string]string)
-		hp.mu.Unlock()
+	if cfg.sync {
+		_, err := pipe.Exec(ctx)
+		return err
 	}
 
-	return err
+	// Async: fire and forget
+	go func() {
+		if _, err := pipe.Exec(ctx); err != nil {
+			hp.client.opts.logger.Error("async Clear failed", "hash", hp.hash, "error", err)
+		}
+	}()
+	return nil
 }
 
 // ReplaceAll atomically deletes all fields and sets new ones.
 // This solves the race condition in DEL + HMSET + PUBLISH patterns.
 // If fields is nil or empty, just deletes and publishes "cleared".
-func (hp *HashPublisher) ReplaceAll(fields map[string]any) error {
+// By default, this is async (fire-and-forget). Use Sync() for confirmation.
+func (hp *HashPublisher) ReplaceAll(fields map[string]any, opts ...SetOption) error {
+	cfg := defaultSetConfig()
+	for _, opt := range opts {
+		opt(cfg)
+	}
+
+	// Update local cache optimistically
+	hp.mu.Lock()
+	hp.previous = make(map[string]string)
+	for field, value := range fields {
+		hp.previous[field] = stringify(value)
+	}
+	hp.mu.Unlock()
+
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.Del(ctx, hp.hash)
@@ -323,18 +427,18 @@ func (hp *HashPublisher) ReplaceAll(fields map[string]any) error {
 		pipe.Publish(ctx, hp.channel, "cleared")
 	}
 
-	_, err := pipe.Exec(ctx)
-
-	if err == nil {
-		hp.mu.Lock()
-		hp.previous = make(map[string]string)
-		for field, value := range fields {
-			hp.previous[field] = stringify(value)
-		}
-		hp.mu.Unlock()
+	if cfg.sync {
+		_, err := pipe.Exec(ctx)
+		return err
 	}
 
-	return err
+	// Async: fire and forget
+	go func() {
+		if _, err := pipe.Exec(ctx); err != nil {
+			hp.client.opts.logger.Error("async ReplaceAll failed", "hash", hp.hash, "error", err)
+		}
+	}()
+	return nil
 }
 
 // HashWatcher subscribes to a channel and fetches hash values on notification.
