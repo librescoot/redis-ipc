@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
@@ -9,120 +8,120 @@ import (
 	"syscall"
 	"time"
 
-	redis_ipc "rescoot-redis-ipc"
+	redis_ipc "github.com/librescoot/redis-ipc"
 )
 
 const (
 	testChannel = "test-channel"
 	testQueue   = "test-queue"
 	testKey     = "test-key"
+	testHash    = "test-hash"
 )
 
 func main() {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lmicroseconds | log.Lshortfile)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	log.Printf("Initializing IPC client...")
-	client, err := redis_ipc.New(redis_ipc.Config{
-		Address:       "localhost",
-		Port:          6379,
-		RetryInterval: time.Second,
-		MaxRetries:    3,
-	})
+	client, err := redis_ipc.New(
+		redis_ipc.WithAddress("localhost"),
+		redis_ipc.WithPort(6379),
+		redis_ipc.WithRetryInterval(time.Second),
+		redis_ipc.WithMaxRetries(3),
+	)
 	if err != nil {
 		log.Fatalf("Failed to create IPC client: %v", err)
 	}
 	defer client.Close()
 
-	// Create message handler
+	// Subscribe to a typed channel
 	log.Printf("Setting up subscription handler...")
-	sg := client.Subscribe("example")
-	err = sg.Handle(testChannel, func(msg []byte) error {
-		log.Printf("SUB: Received message on %s: %s", testChannel, string(msg))
+	_, err = redis_ipc.Subscribe(client, testChannel, func(msg string) error {
+		log.Printf("SUB: Received message on %s: %s", testChannel, msg)
 		return nil
 	})
 	if err != nil {
-		log.Fatalf("Failed to set up subscription handler: %v", err)
+		log.Fatalf("Failed to subscribe: %v", err)
 	}
 
 	// Set up request processor
 	log.Printf("Setting up request handler...")
-	client.HandleRequests(testQueue, func(data []byte) error {
-		log.Printf("QUEUE: Processing request from %s: %s", testQueue, string(data))
+	redis_ipc.HandleRequests(client, testQueue, func(msg string) error {
+		log.Printf("QUEUE: Processing request from %s: %s", testQueue, msg)
 		return nil
 	})
 
-	// Start test message publisher
+	// Set up a hash watcher
+	log.Printf("Setting up hash watcher...")
+	watcher := client.NewHashWatcher(testHash)
+	watcher.OnField("status", func(value string) error {
+		log.Printf("HASH: status changed to %s", value)
+		return nil
+	})
+	watcher.OnAny(func(field, value string) error {
+		log.Printf("HASH: %s = %s", field, value)
+		return nil
+	})
+	if err := watcher.Start(); err != nil {
+		log.Fatalf("Failed to start hash watcher: %v", err)
+	}
+	defer watcher.Stop()
+
+	// Start test publisher
 	go func() {
 		count := 0
 		ticker := time.NewTicker(2 * time.Second)
 		defer ticker.Stop()
 
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				count++
+		hp := client.NewHashPublisher(testHash)
 
-				// Test direct command execution
-				value := fmt.Sprintf("test-value-%d", count)
-				log.Printf("DIRECT: Setting %s = %s", testKey, value)
+		for range ticker.C {
+			count++
 
-				err := client.Set(testKey, value, 0)
-				if err != nil {
-					log.Printf("ERROR: Direct SET failed: %v", err)
-					continue
-				}
+			// Direct key operations
+			value := fmt.Sprintf("test-value-%d", count)
+			log.Printf("DIRECT: Setting %s = %s", testKey, value)
+			if err := client.Set(testKey, value, 0); err != nil {
+				log.Printf("ERROR: SET failed: %v", err)
+				continue
+			}
 
-				// Read back the value using direct command
-				readValue, err := client.Get(testKey)
-				if err != nil {
-					log.Printf("ERROR: Direct GET failed: %v", err)
-					continue
-				}
-				log.Printf("DIRECT: Read %s = %s", testKey, readValue)
+			readValue, err := client.Get(testKey)
+			if err != nil {
+				log.Printf("ERROR: GET failed: %v", err)
+				continue
+			}
+			log.Printf("DIRECT: Read %s = %s", testKey, readValue)
 
-				// Test transaction with results
-				txg := client.NewTxGroup("example-tx")
-				txg.Add("SET", testKey+"-tx", value)
-				txg.Add("GET", testKey+"-tx")
-				txg.Add("INCR", "counter")
+			// Transaction group
+			txg := client.NewTxGroup()
+			txg.Add("SET", testKey+"-tx", value)
+			txg.Add("GET", testKey+"-tx")
+			txg.Add("INCR", "counter")
+			results, err := txg.Exec()
+			if err != nil {
+				log.Printf("ERROR: Transaction failed: %v", err)
+				continue
+			}
+			log.Printf("TX: Results: SET=%v, GET=%v, INCR=%v",
+				results[0], results[1], results[2])
 
-				results, err := txg.Exec()
-				if err != nil {
-					log.Printf("ERROR: Transaction failed: %v", err)
-					continue
-				}
+			// Hash publisher (async by default)
+			hp.Set("status", fmt.Sprintf("running-%d", count))
+			hp.SetMany(map[string]any{
+				"count":      count,
+				"updated_at": time.Now().Format(time.RFC3339),
+			})
 
-				log.Printf("TX: Results: SET=%v, GET=%v, INCR=%v",
-					results[0], results[1], results[2])
+			// Publish to channel
+			msg := fmt.Sprintf("test-message-%d", count)
+			log.Printf("PUB: Publishing to %s: %s", testChannel, msg)
+			client.Publish(testChannel, msg)
 
-				// Publish test message
-				msg := fmt.Sprintf("test-message-%d", count)
-				log.Printf("PUB: Publishing to %s: %s", testChannel, msg)
-				txg = client.NewTxGroup("pub-tx")
-				txg.Add("PUBLISH", testChannel, msg)
-				pubResults, err := txg.Exec()
-				if err != nil {
-					log.Printf("ERROR: Publish failed: %v", err)
-					continue
-				}
-				log.Printf("PUB: Result: %v", pubResults[0])
-
-				// Push test queue item
-				item := fmt.Sprintf("test-item-%d", count)
-				log.Printf("QUEUE: Pushing to %s: %s", testQueue, item)
-				txg = client.NewTxGroup("queue-tx")
-				txg.Add("LPUSH", testQueue, item)
-				queueResults, err := txg.Exec()
-				if err != nil {
-					log.Printf("ERROR: Queue push failed: %v", err)
-					continue
-				}
-				log.Printf("QUEUE: Result: %v", queueResults[0])
+			// Push to queue
+			item := fmt.Sprintf("test-item-%d", count)
+			log.Printf("QUEUE: Pushing to %s: %s", testQueue, item)
+			if err := redis_ipc.SendRequest(client, testQueue, item); err != nil {
+				log.Printf("ERROR: Queue push failed: %v", err)
 			}
 		}
 	}()
