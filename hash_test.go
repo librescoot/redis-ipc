@@ -1055,3 +1055,163 @@ func TestOnFieldTyped(t *testing.T) {
 	// Cleanup
 	client.Del(hash)
 }
+
+func TestAsyncSetCompletesBeforeClose(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+
+	hash := "test:asyncclose:" + time.Now().Format(time.RFC3339Nano)
+	pub := client.NewHashPublisher(hash)
+
+	// Fire off several async sets
+	for i := 0; i < 10; i++ {
+		err := pub.Set("field", "value", NoPublish())
+		if err != nil {
+			t.Fatalf("Set() failed: %v", err)
+		}
+	}
+
+	// Close should wait for async operations
+	err = client.CloseWithTimeout(5 * time.Second)
+	if err != nil {
+		t.Errorf("CloseWithTimeout() error: %v", err)
+	}
+
+	// Verify the value was written by connecting with a new client
+	client2, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() for verification failed: %v", err)
+	}
+	defer client2.Close()
+
+	val, err := client2.HGet(hash, "field")
+	if err != nil {
+		t.Fatalf("HGet() verification failed: %v", err)
+	}
+	if val != "value" {
+		t.Errorf("HGet() = %q, want %q", val, "value")
+	}
+
+	// Cleanup
+	client2.Del(hash)
+}
+
+func TestStartWithSyncGate(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	hash := "test:syncgate:" + time.Now().Format(time.RFC3339Nano)
+
+	// Pre-populate the hash
+	pub := client.NewHashPublisher(hash)
+	err = pub.Set("state", "initial", Sync())
+	if err != nil {
+		t.Fatalf("Set() failed: %v", err)
+	}
+
+	// Track the order of handler calls
+	calls := make(chan string, 10)
+
+	watcher := client.NewHashWatcher(hash)
+	watcher.OnField("state", func(value string) error {
+		calls <- value
+		return nil
+	})
+
+	// StartWithSync should deliver "initial" first
+	err = watcher.StartWithSync()
+	if err != nil {
+		t.Fatalf("StartWithSync() failed: %v", err)
+	}
+	defer watcher.Stop()
+
+	// The initial sync value should be the first thing received
+	select {
+	case val := <-calls:
+		if val != "initial" {
+			t.Errorf("First call = %q, want %q (initial sync)", val, "initial")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for initial sync value")
+	}
+
+	// Now publish a new value and verify it arrives after
+	err = pub.Set("state", "updated", Sync())
+	if err != nil {
+		t.Fatalf("Set() failed: %v", err)
+	}
+
+	select {
+	case val := <-calls:
+		if val != "updated" {
+			t.Errorf("Second call = %q, want %q", val, "updated")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for updated value")
+	}
+
+	// Cleanup
+	client.Del(hash)
+}
+
+func TestDebounceRapidUpdates(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	hash := "test:debouncerace:" + time.Now().Format(time.RFC3339Nano)
+
+	received := make(chan string, 20)
+
+	watcher := client.NewHashWatcher(hash)
+	watcher.SetDebounce(100 * time.Millisecond)
+	watcher.OnField("state", func(value string) error {
+		received <- value
+		return nil
+	})
+
+	err = watcher.Start()
+	if err != nil {
+		t.Fatalf("Start() failed: %v", err)
+	}
+	defer watcher.Stop()
+
+	time.Sleep(100 * time.Millisecond)
+
+	pub := client.NewHashPublisher(hash)
+
+	// Send many rapid updates - debounce should coalesce to "final"
+	for i := 0; i < 20; i++ {
+		pub.Set("state", "intermediate", Sync())
+	}
+	pub.Set("state", "final", Sync())
+
+	// Wait for debounce
+	time.Sleep(300 * time.Millisecond)
+
+	// Drain and check last value
+	var last string
+	for {
+		select {
+		case val := <-received:
+			last = val
+		default:
+			goto done
+		}
+	}
+done:
+
+	if last != "final" {
+		t.Errorf("Last debounced value = %q, want %q", last, "final")
+	}
+
+	// Cleanup
+	client.Del(hash)
+}
