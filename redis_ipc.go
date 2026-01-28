@@ -146,7 +146,8 @@ func WithURL(rawURL string) Option {
 
 		u, err := url.Parse(rawURL)
 		if err != nil {
-			return // Keep defaults on parse error
+			o.logger.Error("WithURL: failed to parse URL", "url", rawURL, "error", err)
+			return
 		}
 
 		if u.Hostname() != "" {
@@ -280,7 +281,7 @@ func (c *Client) monitorConnection() {
 		case <-c.ctx.Done():
 			return
 		case <-ticker.C:
-			err := c.redis.Ping(context.Background()).Err()
+			err := c.redis.Ping(c.ctx).Err()
 			if err != nil {
 				c.opts.logger.Error("connection check failed", "error", err)
 				c.setConnected(false)
