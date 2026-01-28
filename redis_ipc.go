@@ -299,6 +299,11 @@ func (c *Client) Close() error {
 func (c *Client) CloseWithTimeout(timeout time.Duration) error {
 	c.cancel()
 
+	// Close the Redis connection to unblock PubSub subscription goroutines
+	// that are waiting on channel reads. Context cancellation alone does not
+	// close PubSub channels; closing the underlying connection does.
+	err := c.redis.Close()
+
 	done := make(chan struct{})
 	go func() {
 		c.wg.Wait()
@@ -312,7 +317,7 @@ func (c *Client) CloseWithTimeout(timeout time.Duration) error {
 		c.opts.logger.Warn("shutdown timeout, some handlers may not have finished", "timeout", timeout)
 	}
 
-	return c.redis.Close()
+	return err
 }
 
 // Subscribe creates or retrieves a typed subscription
