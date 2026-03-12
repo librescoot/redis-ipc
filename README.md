@@ -13,6 +13,7 @@ Redis-based IPC library for Go with type-safe generics, functional options, and 
 - **Fault Set Management**: Redis SET with pub/sub notifications
 - **Stream Publishing**: XADD with configurable max length
 - **Stream Consumption**: XREAD with optional consumer groups
+- **Transaction Builder**: Atomic MULTI/EXEC across HashPublisher, FaultSet, and StreamPublisher
 
 ## Installation
 
@@ -285,15 +286,40 @@ consumer.Handle(handler)
 consumer.Start(">")
 ```
 
-## Transactions
+## Transaction Builder
+
+`Tx` combines operations from `HashPublisher`, `FaultSet`, and `StreamPublisher` into a single atomic MULTI/EXEC pipeline. Hash caches are only updated after a successful `Exec`.
 
 ```go
-tx := client.NewTxGroup()
-tx.Add("HSET", "vehicle", "state", "ready").
-   Add("HSET", "vehicle", "state:timestamp", time.Now().Unix()).
-   Add("PUBLISH", "vehicle", "state")
+battery := client.NewHashPublisher("battery:0")
+faults := client.NewFaultSet("battery:0:fault", "battery:0", "fault")
+events := client.NewStreamPublisher("events:faults")
 
-results, err := tx.Exec()
+// All operations execute atomically
+tx := client.NewTx()
+changed := tx.HashSetManyIfChanged(battery, map[string]any{
+    "state": "fault",
+    "code":  "35",
+})
+tx.FaultAdd(faults, 35)
+tx.StreamAdd(events, map[string]any{"event": "fault_detected", "code": "35"})
+
+if err := tx.Exec(); err != nil {
+    // Redis error: nothing committed, hash cache unchanged
+}
+// On success: hash fields written, fault added, stream entry appended, cache updated
+
+// Batch fault add/remove with a single PUBLISH
+tx2 := client.NewTx()
+tx2.FaultUpdate(faults, []int{36, 37}, []int{35}) // add 36+37, remove 35
+tx2.Exec()
+
+// Use a specific context (e.g., for timeout)
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+tx3 := client.NewTxWithContext(ctx)
+tx3.HashSetManyIfChanged(battery, fields)
+tx3.Exec()
 ```
 
 ## Message Router

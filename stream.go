@@ -1,6 +1,7 @@
 package redis_ipc
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -87,6 +88,17 @@ func StreamAdd[T any](sp *StreamPublisher, msg T) (string, error) {
 	}
 
 	return sp.Add(values)
+}
+
+// queueAdd queues XADD onto an external pipeline.
+func (sp *StreamPublisher) queueAdd(ctx context.Context, pipe redis.Pipeliner, values map[string]any) {
+	pipe.XAdd(ctx, &redis.XAddArgs{
+		Stream: sp.stream,
+		MaxLen: sp.maxLen,
+		Approx: true,
+		ID:     "*",
+		Values: values,
+	})
 }
 
 // StreamConsumer consumes messages from a Redis stream using XREAD.

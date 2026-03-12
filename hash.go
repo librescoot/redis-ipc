@@ -910,6 +910,70 @@ func (fs *FaultSet) SetMany(codes []int) error {
 	return err
 }
 
+// queueSetManyIfChanged queues HSET + PUBLISH onto an external pipeline without updating the cache.
+// Returns a commit function (to call after successful Exec) and the list of changed field names.
+func (hp *HashPublisher) queueSetManyIfChanged(ctx context.Context, pipe redis.Pipeliner, fields map[string]any) (func(), []string) {
+	if len(fields) == 0 {
+		return nil, nil
+	}
+
+	stringified := make(map[string]string, len(fields))
+	for field, value := range fields {
+		stringified[field] = stringify(value)
+	}
+
+	hp.mu.Lock()
+	var changedFields []string
+	for field, strVal := range stringified {
+		if prev, ok := hp.previous[field]; !ok || prev != strVal {
+			changedFields = append(changedFields, field)
+		}
+	}
+	hp.mu.Unlock()
+
+	for field, strVal := range stringified {
+		pipe.HSet(ctx, hp.hash, field, strVal)
+	}
+	for _, field := range changedFields {
+		pipe.Publish(ctx, hp.channel, field)
+	}
+
+	commit := func() {
+		hp.mu.Lock()
+		for field, strVal := range stringified {
+			hp.previous[field] = strVal
+		}
+		hp.mu.Unlock()
+	}
+
+	return commit, changedFields
+}
+
+// queueAdd queues SADD + PUBLISH onto an external pipeline.
+func (fs *FaultSet) queueAdd(ctx context.Context, pipe redis.Pipeliner, code int) {
+	pipe.SAdd(ctx, fs.setKey, code)
+	pipe.Publish(ctx, fs.channel, fs.payload)
+}
+
+// queueRemove queues SREM + PUBLISH onto an external pipeline.
+func (fs *FaultSet) queueRemove(ctx context.Context, pipe redis.Pipeliner, code int) {
+	pipe.SRem(ctx, fs.setKey, code)
+	pipe.Publish(ctx, fs.channel, fs.payload)
+}
+
+// queueUpdate queues a batch of SADD/SREM + a single PUBLISH onto an external pipeline.
+func (fs *FaultSet) queueUpdate(ctx context.Context, pipe redis.Pipeliner, adds, removes []int) {
+	for _, code := range adds {
+		pipe.SAdd(ctx, fs.setKey, code)
+	}
+	for _, code := range removes {
+		pipe.SRem(ctx, fs.setKey, code)
+	}
+	if len(adds)+len(removes) > 0 {
+		pipe.Publish(ctx, fs.channel, fs.payload)
+	}
+}
+
 // helper to convert any value to string
 func stringify(v any) string {
 	switch val := v.(type) {
