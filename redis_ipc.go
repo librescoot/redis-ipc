@@ -15,6 +15,9 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// ErrNil is returned when a key or field does not exist in Redis.
+var ErrNil = redis.Nil
+
 // Codec handles message serialization/deserialization
 type Codec interface {
 	Encode(v any) ([]byte, error)
