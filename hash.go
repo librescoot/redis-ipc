@@ -340,7 +340,7 @@ func (hp *HashPublisher) SetWithTimestamp(field string, value any, opts ...SetOp
 
 	strVal := stringify(value)
 	tsField := field + ":timestamp"
-	ts := fmt.Sprintf("%d", time.Now().UnixMilli())
+	ts := time.Now().UTC().Format(time.RFC3339)
 
 	// Snapshot previous values for rollback
 	hp.mu.Lock()
