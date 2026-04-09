@@ -746,10 +746,13 @@ func (hw *HashWatcher) processField(field string) {
 	// Fetch the value from hash
 	value, err := hw.client.redis.HGet(hw.client.ctx, hw.hash, field).Result()
 	if err != nil {
-		if err != redis.Nil {
+		if err == redis.Nil {
+			// Field was deleted; treat as empty value so handlers see the removal
+			value = ""
+		} else {
 			hw.client.opts.logger.Error("HGET error", "hash", hw.hash, "field", field, "error", err)
+			return
 		}
-		return
 	}
 
 	if hw.debounce > 0 {
