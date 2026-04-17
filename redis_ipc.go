@@ -27,8 +27,8 @@ type Codec interface {
 // JSONCodec is the default codec using JSON
 type JSONCodec struct{}
 
-func (JSONCodec) Encode(v any) ([]byte, error)       { return json.Marshal(v) }
-func (JSONCodec) Decode(data []byte, v any) error    { return json.Unmarshal(data, v) }
+func (JSONCodec) Encode(v any) ([]byte, error)    { return json.Marshal(v) }
+func (JSONCodec) Decode(data []byte, v any) error { return json.Unmarshal(data, v) }
 
 // StringCodec passes strings through unchanged
 type StringCodec struct{}
@@ -450,13 +450,21 @@ func (qh *QueueHandler[T]) processLoopWithRestart() {
 	}
 }
 
+// brpopBlockingTimeout is the server-side BRPOP timeout. A long timeout
+// collapses the poll loop into a near-idle blocking wait — we don't need
+// sub-second reactivity for queue commands, and 1-second polling on a
+// localhost Redis made transient client ReadTimeouts disproportionately
+// visible in logs. Shutdown still unblocks immediately because ctx
+// cancellation closes the connection.
+const brpopBlockingTimeout = 30 * time.Second
+
 func (qh *QueueHandler[T]) processLoop() {
 	for {
 		if qh.isStopped() {
 			return
 		}
 
-		result, err := qh.client.redis.BRPop(qh.client.ctx, 1*time.Second, qh.queue).Result()
+		result, err := qh.client.redis.BRPop(qh.client.ctx, brpopBlockingTimeout, qh.queue).Result()
 		if err == redis.Nil {
 			continue
 		}
@@ -464,7 +472,12 @@ func (qh *QueueHandler[T]) processLoop() {
 			if qh.client.ctx.Err() != nil {
 				return
 			}
-			qh.client.opts.logger.Error("BRPOP error", "queue", qh.queue, "error", err)
+			// Transient read errors (e.g. i/o timeout during brief Redis
+			// stalls) are expected at this level — the outer
+			// processLoopWithRestart sleeps 5s and restarts the handler,
+			// no messages are lost. Warn-level keeps the trail visible
+			// without drowning out real errors.
+			qh.client.opts.logger.Warn("BRPOP error, restarting handler", "queue", qh.queue, "error", err)
 			return
 		}
 
