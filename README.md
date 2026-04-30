@@ -1,6 +1,8 @@
-# LibreScoot Redis IPC Library
+# Librescoot Redis IPC Library
 
-Redis-based IPC library for Go with type-safe generics, functional options, and LibreScoot-specific patterns for hash-based state management.
+Redis-based IPC library for Go with type-safe generics, functional options, and Librescoot-specific patterns for hash-based state management.
+
+Part of the [Librescoot](https://librescoot.org/) open-source platform.
 
 ## Features
 
@@ -76,9 +78,9 @@ defer handler.Stop()
 ipc.SendRequest(client, "scooter:commands", Command{Action: "unlock"})
 ```
 
-## LibreScoot Hash Pattern
+## Librescoot Hash Pattern
 
-The LibreScoot pattern stores state in Redis hashes and notifies via pub/sub:
+The Librescoot pattern stores state in Redis hashes and notifies via pub/sub:
 - Publisher: `HSET vehicle state "ready"` → `PUBLISH vehicle "state"`
 - Consumer: `SUBSCRIBE vehicle` → receives `"state"` → `HGET vehicle state`
 
@@ -477,4 +479,11 @@ watcher.StartWithSync()
 
 ## License
 
-AGPL-3.0, see LICENSE for details.
+This project is dual-licensed. The source code is available under the
+[GNU Affero General Public License v3.0][agpl-3.0].
+The maintainers reserve the right to grant separate licenses for commercial distribution; please contact the maintainers to discuss commercial licensing.
+
+[![AGPL v3][agpl-image]][agpl-3.0]
+
+[agpl-3.0]: https://www.gnu.org/licenses/agpl-3.0.en.html
+[agpl-image]: https://www.gnu.org/graphics/agplv3-88x31.png
