@@ -119,6 +119,28 @@ Behaviour notes:
 - If no server is registered, the request sits in the list. When a server starts, it picks the request up — but if its deadline has expired, it's dropped without a reply. The caller hits `ErrCallTimeout`.
 - `Stop()` waits for in-flight handlers to finish before returning.
 
+### CallServer: many methods, one BRPOP
+
+`HandleCalls` is one BRPOP loop per method. With several methods you accumulate blocking Redis connections fast — each BRPOP holds a pool slot for as long as it's waiting. `CallServer` is the multi-method shape: one shared request channel per service, one BRPOP loop, the server dispatches by `method` field on the envelope.
+
+```go
+// Server side
+srv := ipc.NewCallServer(client, "motion:rpc")
+ipc.RegisterCall[GetCalReq, CalResp](srv, "get-calibration", handleGetCal)
+ipc.RegisterCall[PrepHibReq, PrepHibResp](srv, "prepare-hibernation", handlePrepHib)
+ipc.RegisterCall[Empty, OK](srv, "clear-latch", handleClearLatch)
+srv.Start()
+defer srv.Stop()
+
+// Client side
+resp, err := ipc.CallMethod[Req, Resp](client, "motion:rpc", "get-calibration", req, 1*time.Second)
+```
+
+- `RegisterCall` panics if called after `Start`, or for a duplicate method name — both are programmer errors and silent ignore would be worse than crashing in dev.
+- Unknown method on the server returns a `*CallError` with `Msg = "unknown method: X"` to the caller.
+- `WithCallServerConcurrency(n)` caps in-flight handler invocations across all methods on the server (default 4).
+- Wire-compatible with the per-method `Call` clients: the envelope's `method` field is optional. `Call`/`HandleCalls` and `CallMethod`/`CallServer` can coexist on different channels.
+
 ## Librescoot Hash Pattern
 
 The Librescoot pattern stores state in Redis hashes and notifies via pub/sub:

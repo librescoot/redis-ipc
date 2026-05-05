@@ -43,6 +43,7 @@ func IsCallError(err error) bool {
 
 type callEnvelope struct {
 	ID           string          `json:"id"`
+	Method       string          `json:"method,omitempty"` // empty for one-channel-per-RPC (Call); populated for CallServer dispatch
 	ReplyChannel string          `json:"reply_channel"`
 	Deadline     int64           `json:"deadline"`
 	Payload      json.RawMessage `json:"payload"`
