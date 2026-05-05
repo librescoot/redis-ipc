@@ -78,6 +78,47 @@ defer handler.Stop()
 ipc.SendRequest(client, "scooter:commands", Command{Action: "unlock"})
 ```
 
+## RPC: Call / HandleCalls
+
+Synchronous request/response over Redis. Request leg uses a list (LPUSH/BRPOP) so requests survive brief server restarts; reply leg uses pub/sub (PUBLISH/SUBSCRIBE) so sub-second timeouts work and there's no per-call key bookkeeping.
+
+```go
+type SetProfile struct {
+    Profile string `json:"profile"`
+}
+type ProfileApplied struct {
+    Profile string `json:"profile"`
+    OK      bool   `json:"ok"`
+}
+
+// Server side
+srv := ipc.HandleCalls[SetProfile, ProfileApplied](client, "motion:rpc:set-profile",
+    func(req SetProfile) (ProfileApplied, error) {
+        if err := chip.applyProfile(req.Profile); err != nil {
+            return ProfileApplied{}, err
+        }
+        return ProfileApplied{Profile: req.Profile, OK: true}, nil
+    },
+    ipc.WithCallConcurrency(4), // optional, default 4
+)
+defer srv.Stop()
+
+// Client side
+resp, err := ipc.Call[SetProfile, ProfileApplied](client, "motion:rpc:set-profile",
+    SetProfile{Profile: "armed-hibernation"},
+    1*time.Second)
+if errors.Is(err, ipc.ErrCallTimeout) {
+    // server didn't reply in time
+} else if ipc.IsCallError(err) {
+    // server-side handler returned an error
+}
+```
+
+Behaviour notes:
+- Request envelopes carry a deadline; servers drop requests whose deadline has already passed (caller already gave up).
+- If no server is registered, the request sits in the list. When a server starts, it picks the request up — but if its deadline has expired, it's dropped without a reply. The caller hits `ErrCallTimeout`.
+- `Stop()` waits for in-flight handlers to finish before returning.
+
 ## Librescoot Hash Pattern
 
 The Librescoot pattern stores state in Redis hashes and notifies via pub/sub:
