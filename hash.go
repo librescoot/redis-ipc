@@ -834,6 +834,10 @@ func (hw *HashWatcher) Fetch(field string) (string, error) {
 }
 
 // FaultSet manages a Redis set of fault codes with pub/sub notification.
+//
+// Deprecated: prefer FaultReporter, which couples the set, the events:faults
+// stream, and the pubsub notification into one primitive so the stream and
+// set cannot drift. FaultSet stays for callers that don't need the stream.
 type FaultSet struct {
 	client  *Client
 	setKey  string
