@@ -59,7 +59,7 @@ func WithFaultMaxLen(n int64) FaultReporterOption {
 }
 
 // NewFaultReporter creates a FaultReporter for the given group. Defaults
-// follow the LibreScoot convention:
+// follow the Librescoot convention:
 //
 //	set key:  "<group>:fault"
 //	channel:  "<group>"

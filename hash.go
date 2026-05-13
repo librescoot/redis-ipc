@@ -37,7 +37,7 @@ func Sync() SetOption {
 }
 
 // HashPublisher provides atomic HSET + PUBLISH with change detection.
-// This matches the LibreScoot pattern where:
+// This matches the Librescoot pattern where:
 // - State is stored in a Redis hash
 // - Changes are notified via pub/sub with the field name as payload
 // - Consumers fetch the value using HGET
@@ -540,7 +540,7 @@ func (hp *HashPublisher) ReplaceAll(fields map[string]any, opts ...SetOption) er
 }
 
 // HashWatcher subscribes to a channel and fetches hash values on notification.
-// This matches the LibreScoot consumer pattern.
+// This matches the Librescoot consumer pattern.
 type HashWatcher struct {
 	client        *Client
 	hash          string
