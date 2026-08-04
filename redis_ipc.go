@@ -178,6 +178,12 @@ type Client struct {
 	subGroups   sync.Map
 	reqHandlers sync.Map
 	hashPubs    sync.Map // cached HashPublisher instances
+
+	// Shared connections. Every channel subscription in the process
+	// rides one pub/sub connection, every queue consumer one BRPOP
+	// loop. See mux.go.
+	pubsubMux *pubsubMux
+	queueMux  *queueMux
 }
 
 // New creates a new Redis IPC client with functional options
@@ -204,6 +210,8 @@ func New(opts ...Option) (*Client, error) {
 		ctx:    ctx,
 		cancel: cancel,
 	}
+	c.pubsubMux = newPubsubMux(c)
+	c.queueMux = newQueueMux(c)
 
 	if err := rc.Ping(ctx).Err(); err != nil {
 		cancel()
@@ -318,9 +326,14 @@ func (c *Client) CloseWithTimeout(timeout time.Duration) error {
 		c.opts.logger.Warn("async operations timeout during shutdown", "timeout", timeout)
 	}
 
-	// Close the Redis connection to unblock PubSub subscription goroutines
-	// that are waiting on channel reads. Context cancellation alone does not
-	// close PubSub channels; closing the underlying connection does.
+	// Close the shared pub/sub connection first: that closes the message
+	// channel its dispatch loop reads from, which is what stops the
+	// subscriber goroutines. Context cancellation alone does not.
+	if err := c.pubsubMux.close(); err != nil && err != redis.ErrClosed {
+		c.opts.logger.Debug("pubsub mux close", "error", err)
+	}
+	c.queueMux.close()
+
 	err := c.redis.Close()
 
 	done := make(chan struct{})
@@ -354,56 +367,51 @@ type Subscription[T any] struct {
 	client  *Client
 	channel string
 	handler func(T) error
-	pubsub  *redis.PubSub
+	sub     *pubsubSub
 }
 
 func (s *Subscription[T]) start() error {
-	s.pubsub = s.client.redis.Subscribe(s.client.ctx, s.channel)
-
-	subscribed := make(chan struct{})
-	s.client.wg.Add(1)
-	go func() {
-		defer s.client.wg.Done()
-		ch := s.pubsub.Channel()
-		close(subscribed)
-		for msg := range ch {
-			var val T
-			if err := s.client.opts.codec.Decode([]byte(msg.Payload), &val); err != nil {
-				s.client.opts.logger.Error("decode error", "channel", s.channel, "error", err)
-				continue
-			}
-			if err := s.handler(val); err != nil {
-				s.client.opts.logger.Error("handler error", "channel", s.channel, "error", err)
-			}
+	sub, err := s.client.pubsubMux.subscribe(s.channel, false, func(payload string) {
+		var val T
+		if err := s.client.opts.codec.Decode([]byte(payload), &val); err != nil {
+			s.client.opts.logger.Error("decode error", "channel", s.channel, "error", err)
+			return
 		}
-	}()
-
-	select {
-	case <-subscribed:
-		return nil
-	case <-time.After(5 * time.Second):
-		s.pubsub.Close()
-		return fmt.Errorf("subscription timeout for channel %s", s.channel)
+		if err := s.handler(val); err != nil {
+			s.client.opts.logger.Error("handler error", "channel", s.channel, "error", err)
+		}
+	})
+	if err != nil {
+		return err
 	}
+	s.sub = sub
+	return nil
 }
 
 // Unsubscribe stops the subscription
 func (s *Subscription[T]) Unsubscribe() error {
-	if s.pubsub != nil {
-		return s.pubsub.Close()
+	if s.sub == nil {
+		return nil
 	}
-	return nil
+	return s.client.pubsubMux.unsubscribe(s.sub)
 }
 
-// HandleRequests creates a typed queue handler
+// HandleRequests creates a typed queue handler. The queue joins the
+// client's shared BRPOP loop: every queue in the process is served by
+// one blocking connection, with a dedicated goroutine per queue so a
+// slow handler only stalls its own queue.
 func HandleRequests[T any](c *Client, queue string, handler func(T) error) *QueueHandler[T] {
 	qh := &QueueHandler[T]{
 		client:  c,
 		queue:   queue,
 		handler: handler,
 	}
-	c.wg.Add(1)
-	go qh.processLoopWithRestart()
+	sub, err := c.queueMux.register(queue, qh.dispatch)
+	if err != nil {
+		c.opts.logger.Error("queue handler registration failed", "queue", queue, "error", err)
+		return qh
+	}
+	qh.sub = sub
 	return qh
 }
 
@@ -412,6 +420,7 @@ type QueueHandler[T any] struct {
 	client  *Client
 	queue   string
 	handler func(T) error
+	sub     *queueSub
 	stopped bool
 	stopMu  sync.Mutex
 }
@@ -419,8 +428,13 @@ type QueueHandler[T any] struct {
 // Stop stops the queue handler
 func (qh *QueueHandler[T]) Stop() {
 	qh.stopMu.Lock()
+	already := qh.stopped
 	qh.stopped = true
 	qh.stopMu.Unlock()
+
+	if !already && qh.sub != nil {
+		qh.client.queueMux.unregister(qh.sub)
+	}
 }
 
 func (qh *QueueHandler[T]) isStopped() bool {
@@ -429,24 +443,19 @@ func (qh *QueueHandler[T]) isStopped() bool {
 	return qh.stopped
 }
 
-func (qh *QueueHandler[T]) processLoopWithRestart() {
-	defer qh.client.wg.Done()
+func (qh *QueueHandler[T]) dispatch(payload string) {
+	if qh.isStopped() {
+		return
+	}
 
-	for {
-		if qh.client.ctx.Err() != nil || qh.isStopped() {
-			qh.client.opts.logger.Info("queue handler shutting down", "queue", qh.queue)
-			return
-		}
+	var val T
+	if err := qh.client.opts.codec.Decode([]byte(payload), &val); err != nil {
+		qh.client.opts.logger.Error("decode error", "queue", qh.queue, "error", err)
+		return
+	}
 
-		qh.client.opts.logger.Debug("starting queue handler", "queue", qh.queue)
-		qh.processLoop()
-
-		if qh.client.ctx.Err() != nil || qh.isStopped() {
-			return
-		}
-
-		qh.client.opts.logger.Info("queue handler restarting", "queue", qh.queue, "delay", "5s")
-		time.Sleep(5 * time.Second)
+	if err := qh.handler(val); err != nil {
+		qh.client.opts.logger.Error("handler error", "queue", qh.queue, "error", err)
 	}
 }
 
@@ -458,48 +467,13 @@ func (qh *QueueHandler[T]) processLoopWithRestart() {
 // cancellation closes the connection.
 const brpopBlockingTimeout = 30 * time.Second
 
-func (qh *QueueHandler[T]) processLoop() {
-	for {
-		if qh.isStopped() {
-			return
-		}
-
-		result, err := qh.client.redis.BRPop(qh.client.ctx, brpopBlockingTimeout, qh.queue).Result()
-		if err == redis.Nil {
-			continue
-		}
-		if err != nil {
-			if qh.client.ctx.Err() != nil {
-				return
-			}
-			// Transient read errors (e.g. i/o timeout during brief Redis
-			// stalls) are expected at this level — the outer
-			// processLoopWithRestart sleeps 5s and restarts the handler,
-			// no messages are lost. Warn-level keeps the trail visible
-			// without drowning out real errors.
-			qh.client.opts.logger.Warn("BRPOP error, restarting handler", "queue", qh.queue, "error", err)
-			return
-		}
-
-		var val T
-		if err := qh.client.opts.codec.Decode([]byte(result[1]), &val); err != nil {
-			qh.client.opts.logger.Error("decode error", "queue", qh.queue, "error", err)
-			continue
-		}
-
-		if err := qh.handler(val); err != nil {
-			qh.client.opts.logger.Error("handler error", "queue", qh.queue, "error", err)
-		}
-	}
-}
-
 // Router provides message-type based routing for a channel
 type Router struct {
 	client   *Client
 	channel  string
 	handlers map[string]func(json.RawMessage) error
 	mu       sync.RWMutex
-	pubsub   *redis.PubSub
+	sub      *pubsubSub
 }
 
 // Envelope is the standard message format for routed messages
@@ -534,52 +508,41 @@ func Handle[T any](r *Router, msgType string, handler func(T) error) *Router {
 
 // Start begins listening for messages
 func (r *Router) Start() error {
-	r.pubsub = r.client.redis.Subscribe(r.client.ctx, r.channel)
+	sub, err := r.client.pubsubMux.subscribe(r.channel, false, r.dispatch)
+	if err != nil {
+		return err
+	}
+	r.sub = sub
+	return nil
+}
 
-	subscribed := make(chan struct{})
-	r.client.wg.Add(1)
-	go func() {
-		defer r.client.wg.Done()
-		ch := r.pubsub.Channel()
-		close(subscribed)
+func (r *Router) dispatch(payload string) {
+	var env Envelope
+	if err := json.Unmarshal([]byte(payload), &env); err != nil {
+		r.client.opts.logger.Error("envelope decode error", "channel", r.channel, "error", err)
+		return
+	}
 
-		for msg := range ch {
-			var env Envelope
-			if err := json.Unmarshal([]byte(msg.Payload), &env); err != nil {
-				r.client.opts.logger.Error("envelope decode error", "channel", r.channel, "error", err)
-				continue
-			}
+	r.mu.RLock()
+	handler, ok := r.handlers[env.Type]
+	r.mu.RUnlock()
 
-			r.mu.RLock()
-			handler, ok := r.handlers[env.Type]
-			r.mu.RUnlock()
+	if !ok {
+		r.client.opts.logger.Warn("no handler for message type", "channel", r.channel, "type", env.Type)
+		return
+	}
 
-			if !ok {
-				r.client.opts.logger.Warn("no handler for message type", "channel", r.channel, "type", env.Type)
-				continue
-			}
-
-			if err := handler(env.Data); err != nil {
-				r.client.opts.logger.Error("handler error", "channel", r.channel, "type", env.Type, "error", err)
-			}
-		}
-	}()
-
-	select {
-	case <-subscribed:
-		return nil
-	case <-time.After(5 * time.Second):
-		r.pubsub.Close()
-		return fmt.Errorf("router subscription timeout for channel %s", r.channel)
+	if err := handler(env.Data); err != nil {
+		r.client.opts.logger.Error("handler error", "channel", r.channel, "type", env.Type, "error", err)
 	}
 }
 
 // Stop stops the router
 func (r *Router) Stop() error {
-	if r.pubsub != nil {
-		return r.pubsub.Close()
+	if r.sub == nil {
+		return nil
 	}
-	return nil
+	return r.client.pubsubMux.unsubscribe(r.sub)
 }
 
 // PublishRouted publishes a message with type routing

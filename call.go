@@ -22,8 +22,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // ErrCallTimeout is returned by Call when no response arrives within
@@ -154,13 +152,15 @@ type CallHandler[Req, Resp any] struct {
 	channel  string
 	handler  func(Req) (Resp, error)
 	sem      chan struct{}
+	sub      *queueSub
 	stopped  bool
 	stopMu   sync.Mutex
 	inflight sync.WaitGroup
 }
 
-// HandleCalls registers a typed RPC handler. Each incoming request is
-// dispatched to a goroutine bounded by the concurrency option.
+// HandleCalls registers a typed RPC handler. The request channel joins
+// the client's shared BRPOP loop; each incoming request is dispatched to
+// a goroutine bounded by the concurrency option.
 func HandleCalls[Req, Resp any](c *Client, channel string, handler func(Req) (Resp, error), opts ...CallHandlerOption) *CallHandler[Req, Resp] {
 	o := &callHandlerOpts{concurrency: 4}
 	for _, opt := range opts {
@@ -172,8 +172,12 @@ func HandleCalls[Req, Resp any](c *Client, channel string, handler func(Req) (Re
 		handler: handler,
 		sem:     make(chan struct{}, o.concurrency),
 	}
-	c.wg.Add(1)
-	go h.processLoopWithRestart()
+	sub, err := c.queueMux.register(channel, h.dispatch)
+	if err != nil {
+		c.opts.logger.Error("call handler registration failed", "channel", channel, "error", err)
+		return h
+	}
+	h.sub = sub
 	return h
 }
 
@@ -181,8 +185,13 @@ func HandleCalls[Req, Resp any](c *Client, channel string, handler func(Req) (Re
 // for in-flight handlers to finish.
 func (h *CallHandler[Req, Resp]) Stop() {
 	h.stopMu.Lock()
+	already := h.stopped
 	h.stopped = true
 	h.stopMu.Unlock()
+
+	if !already && h.sub != nil {
+		h.client.queueMux.unregister(h.sub)
+	}
 	h.inflight.Wait()
 }
 
@@ -192,60 +201,29 @@ func (h *CallHandler[Req, Resp]) isStopped() bool {
 	return h.stopped
 }
 
-func (h *CallHandler[Req, Resp]) processLoopWithRestart() {
-	defer h.client.wg.Done()
-	for {
-		if h.client.ctx.Err() != nil || h.isStopped() {
-			h.client.opts.logger.Info("call handler shutting down", "channel", h.channel)
-			return
-		}
-		h.processLoop()
-		if h.client.ctx.Err() != nil || h.isStopped() {
-			return
-		}
-		h.client.opts.logger.Info("call handler restarting", "channel", h.channel, "delay", "5s")
-		time.Sleep(5 * time.Second)
+func (h *CallHandler[Req, Resp]) dispatch(payload string) {
+	if h.isStopped() {
+		return
 	}
-}
-
-func (h *CallHandler[Req, Resp]) processLoop() {
-	for {
-		if h.isStopped() {
-			return
-		}
-		result, err := h.client.redis.BRPop(h.client.ctx, brpopBlockingTimeout, h.channel).Result()
-		if err == redis.Nil {
-			continue
-		}
-		if err != nil {
-			if h.client.ctx.Err() != nil {
-				return
-			}
-			h.client.opts.logger.Warn("BRPOP error, restarting call handler", "channel", h.channel, "error", err)
-			return
-		}
-		if len(result) < 2 {
-			continue
-		}
-		var env callEnvelope
-		if err := json.Unmarshal([]byte(result[1]), &env); err != nil {
-			h.client.opts.logger.Error("envelope decode error", "channel", h.channel, "error", err)
-			continue
-		}
-		// Drop expired requests without replying — caller already gave up.
-		if env.Deadline > 0 && time.Now().UnixMilli() > env.Deadline {
-			h.client.opts.logger.Debug("dropping expired call", "channel", h.channel, "id", env.ID)
-			continue
-		}
-		// Acquire semaphore — natural backpressure on BRPOP.
-		select {
-		case h.sem <- struct{}{}:
-		case <-h.client.ctx.Done():
-			return
-		}
-		h.inflight.Add(1)
-		go h.runHandler(env)
+	var env callEnvelope
+	if err := json.Unmarshal([]byte(payload), &env); err != nil {
+		h.client.opts.logger.Error("envelope decode error", "channel", h.channel, "error", err)
+		return
 	}
+	// Drop expired requests without replying; caller already gave up.
+	if env.Deadline > 0 && time.Now().UnixMilli() > env.Deadline {
+		h.client.opts.logger.Debug("dropping expired call", "channel", h.channel, "id", env.ID)
+		return
+	}
+	// Acquire semaphore: backpressure onto this channel's dispatch
+	// goroutine, and from there onto the shared BRPOP loop.
+	select {
+	case h.sem <- struct{}{}:
+	case <-h.client.ctx.Done():
+		return
+	}
+	h.inflight.Add(1)
+	go h.runHandler(env)
 }
 
 func (h *CallHandler[Req, Resp]) runHandler(env callEnvelope) {

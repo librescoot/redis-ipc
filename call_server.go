@@ -3,10 +3,12 @@ package redis_ipc
 // call_server.go — multi-method RPC server.
 //
 // CallServer is the higher-level companion to HandleCalls: instead of one
-// BRPOP loop per RPC method (HandleCalls' shape), a single CallServer owns
-// one BRPOP loop on a per-service request channel and dispatches incoming
-// envelopes by method name. Reply leg is unchanged — the server still
-// PUBLISHes to the per-call reply channel from the envelope.
+// request channel per RPC method (HandleCalls' shape), a single CallServer
+// owns a per-service request channel and dispatches incoming envelopes by
+// method name: one Redis key, one set of handlers. The reply leg is
+// unchanged, the server still PUBLISHes to the per-call reply channel
+// from the envelope. The request channel itself is served by the
+// client's shared BRPOP loop (see mux.go).
 //
 // Wire compatibility: the request envelope adds an optional `method`
 // field. Old Call/HandleCalls clients (no method) still work for their
@@ -20,8 +22,6 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 )
 
 // ErrUnknownMethod is returned (server-side) when a request arrives for a
@@ -109,6 +109,7 @@ type CallServer struct {
 	client  *Client
 	channel string
 	sem     chan struct{}
+	sub     *queueSub
 
 	mu       sync.RWMutex
 	handlers map[string]methodHandler
@@ -183,8 +184,8 @@ func RegisterCall[Req, Resp any](s *CallServer, method string, handler func(Req)
 	s.mu.Unlock()
 }
 
-// Start begins the BRPOP dispatch loop. Idempotent — repeated calls are
-// no-ops.
+// Start joins the request channel to the client's shared BRPOP loop.
+// Idempotent: repeated calls are no-ops.
 func (s *CallServer) Start() {
 	s.mu.Lock()
 	if s.started {
@@ -199,16 +200,25 @@ func (s *CallServer) Start() {
 	s.mu.Unlock()
 
 	s.client.opts.logger.Info("call server starting", "channel", s.channel, "methods", methods)
-	s.client.wg.Add(1)
-	go s.processLoopWithRestart()
+	sub, err := s.client.queueMux.register(s.channel, s.dispatch)
+	if err != nil {
+		s.client.opts.logger.Error("call server registration failed", "channel", s.channel, "error", err)
+		return
+	}
+	s.sub = sub
 }
 
 // Stop signals the server to stop accepting new requests and waits for
 // in-flight handlers to finish.
 func (s *CallServer) Stop() {
 	s.stopMu.Lock()
+	already := s.stopped
 	s.stopped = true
 	s.stopMu.Unlock()
+
+	if !already && s.sub != nil {
+		s.client.queueMux.unregister(s.sub)
+	}
 	s.inflight.Wait()
 }
 
@@ -218,72 +228,41 @@ func (s *CallServer) isStopped() bool {
 	return s.stopped
 }
 
-func (s *CallServer) processLoopWithRestart() {
-	defer s.client.wg.Done()
-	for {
-		if s.client.ctx.Err() != nil || s.isStopped() {
-			s.client.opts.logger.Info("call server shutting down", "channel", s.channel)
-			return
-		}
-		s.processLoop()
-		if s.client.ctx.Err() != nil || s.isStopped() {
-			return
-		}
-		s.client.opts.logger.Info("call server restarting", "channel", s.channel, "delay", "5s")
-		time.Sleep(5 * time.Second)
+func (s *CallServer) dispatch(payload string) {
+	if s.isStopped() {
+		return
 	}
-}
 
-func (s *CallServer) processLoop() {
-	for {
-		if s.isStopped() {
-			return
-		}
-		result, err := s.client.redis.BRPop(s.client.ctx, brpopBlockingTimeout, s.channel).Result()
-		if err == redis.Nil {
-			continue
-		}
-		if err != nil {
-			if s.client.ctx.Err() != nil {
-				return
-			}
-			s.client.opts.logger.Warn("BRPOP error, restarting call server", "channel", s.channel, "error", err)
-			return
-		}
-		if len(result) < 2 {
-			continue
-		}
-		var env callEnvelope
-		if err := json.Unmarshal([]byte(result[1]), &env); err != nil {
-			s.client.opts.logger.Error("envelope decode error", "channel", s.channel, "error", err)
-			continue
-		}
-
-		// Drop expired requests without replying.
-		if env.Deadline > 0 && time.Now().UnixMilli() > env.Deadline {
-			s.client.opts.logger.Debug("dropping expired call", "channel", s.channel, "id", env.ID, "method", env.Method)
-			continue
-		}
-
-		s.mu.RLock()
-		handler, ok := s.handlers[env.Method]
-		s.mu.RUnlock()
-
-		if !ok {
-			// Method-not-found: reply with an error rather than dropping
-			// silently — the caller deserves to know.
-			s.sendReply(env.ReplyChannel, callReply{OK: false, Error: "unknown method: " + env.Method})
-			continue
-		}
-
-		select {
-		case s.sem <- struct{}{}:
-		case <-s.client.ctx.Done():
-			return
-		}
-		s.inflight.Add(1)
-		go s.runHandler(env, handler)
+	var env callEnvelope
+	if err := json.Unmarshal([]byte(payload), &env); err != nil {
+		s.client.opts.logger.Error("envelope decode error", "channel", s.channel, "error", err)
+		return
 	}
+
+	// Drop expired requests without replying.
+	if env.Deadline > 0 && time.Now().UnixMilli() > env.Deadline {
+		s.client.opts.logger.Debug("dropping expired call", "channel", s.channel, "id", env.ID, "method", env.Method)
+		return
+	}
+
+	s.mu.RLock()
+	handler, ok := s.handlers[env.Method]
+	s.mu.RUnlock()
+
+	if !ok {
+		// Method-not-found: reply with an error rather than dropping
+		// silently; the caller deserves to know.
+		s.sendReply(env.ReplyChannel, callReply{OK: false, Error: "unknown method: " + env.Method})
+		return
+	}
+
+	select {
+	case s.sem <- struct{}{}:
+	case <-s.client.ctx.Done():
+		return
+	}
+	s.inflight.Add(1)
+	go s.runHandler(env, handler)
 }
 
 func (s *CallServer) runHandler(env callEnvelope, handler methodHandler) {

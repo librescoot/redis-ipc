@@ -16,6 +16,7 @@ Part of the [Librescoot](https://librescoot.org/) open-source platform.
 - **Stream Publishing**: XADD with configurable max length
 - **Stream Consumption**: XREAD with optional consumer groups
 - **Transaction Builder**: Atomic MULTI/EXEC across HashPublisher, FaultSet, and StreamPublisher
+- **Multiplexed Connections**: All subscriptions share one pub/sub connection, all queues share one BRPOP loop
 
 ## Installation
 
@@ -119,9 +120,9 @@ Behaviour notes:
 - If no server is registered, the request sits in the list. When a server starts, it picks the request up — but if its deadline has expired, it's dropped without a reply. The caller hits `ErrCallTimeout`.
 - `Stop()` waits for in-flight handlers to finish before returning.
 
-### CallServer: many methods, one BRPOP
+### CallServer: many methods, one channel
 
-`HandleCalls` is one BRPOP loop per method. With several methods you accumulate blocking Redis connections fast — each BRPOP holds a pool slot for as long as it's waiting. `CallServer` is the multi-method shape: one shared request channel per service, one BRPOP loop, the server dispatches by `method` field on the envelope.
+`HandleCalls` is one Redis key per method, which spreads a service's RPC surface across a pile of list keys. `CallServer` is the multi-method shape: one shared request channel per service, the server dispatches by `method` field on the envelope.
 
 ```go
 // Server side
@@ -240,7 +241,7 @@ state, _ := watcher.Fetch("state")
 
 #### StartWithSync
 
-Subscribe first, fetch current state, then process messages. This avoids race conditions:
+Subscribe first, fetch current state, then process messages. This avoids race conditions: `StartWithSync` returns only once Redis has confirmed the SUBSCRIBE, and anything published while the initial `HGETALL` runs is buffered and delivered afterwards.
 
 ```go
 watcher := client.NewHashWatcher("vehicle")
@@ -404,6 +405,19 @@ defer router.Stop()
 ipc.PublishRouted(client, "events", "state", StateMsg{...})
 ```
 
+## Connection Model
+
+A `Client` holds far fewer Redis connections than it has consumers.
+
+- **One pub/sub connection per client.** Every `HashWatcher`, `Subscribe[T]` and `Router` registers its channel on a shared subscriber. Ten watchers cost one connection and one SUBSCRIBE per channel, not ten connections. go-redis dedicates a connection to each `PubSub` object, so the naive shape also cost a health-check ping every 3s per watcher.
+- **One BRPOP loop per client.** Every `HandleRequests`, `HandleCalls` and `CallServer` joins a shared blocking pop over all registered keys. BRPOP reports which key popped, so the mux routes by key name. The key order rotates each iteration, so a busy queue cannot starve a quiet one.
+- **Isolation is preserved.** Each subscriber and each queue gets its own goroutine and buffered backlog, so a slow handler stalls only its own channel or queue.
+
+Nothing about this is visible in the API: `Start()`, `Stop()`, `HandleRequests` and friends behave as before. Two consequences worth knowing:
+
+- `WithPoolSize` no longer needs padding for blocking consumers. A service with eight command queues used to need `WithPoolSize(12)` just so its BRPOPs wouldn't exhaust the pool; the default of 3 is now fine.
+- `Stop()` on one watcher only unsubscribes the underlying channel if no other watcher in the process still wants it.
+
 ## Configuration Options
 
 ```go
@@ -414,7 +428,7 @@ client, err := ipc.New(
     // ipc.WithPort(6379),
     ipc.WithRetryInterval(5 * time.Second),
     ipc.WithMaxRetries(3),
-    ipc.WithPoolSize(3),
+    ipc.WithPoolSize(3),  // Blocking consumers share one connection, so the default is usually enough
     ipc.WithDialTimeout(2 * time.Second),
     ipc.WithLogger(slog.Default()),
     ipc.WithCodec(ipc.JSONCodec{}),  // or ipc.StringCodec{}

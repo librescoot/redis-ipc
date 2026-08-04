@@ -549,7 +549,9 @@ type HashWatcher struct {
 	eventHandlers map[string]func() error
 	catchAll      func(field, value string) error
 	mu            sync.RWMutex
-	pubsub        *redis.PubSub
+
+	sub   *pubsubSub
+	subMu sync.Mutex
 
 	// Debounce support
 	debounce       time.Duration
@@ -644,65 +646,34 @@ func (hw *HashWatcher) OnAny(handler func(field, value string) error) *HashWatch
 
 // Start begins listening for messages and fetching values.
 func (hw *HashWatcher) Start() error {
-	hw.pubsub = hw.client.redis.Subscribe(hw.client.ctx, hw.channel)
-
-	subscribed := make(chan struct{})
-	hw.client.wg.Add(1)
-	go func() {
-		defer hw.client.wg.Done()
-		ch := hw.pubsub.Channel()
-		close(subscribed)
-
-		for msg := range ch {
-			hw.processField(msg.Payload)
-		}
-	}()
-
-	select {
-	case <-subscribed:
-		return nil
-	case <-time.After(5 * time.Second):
-		return fmt.Errorf("subscription timeout for channel %s", hw.channel)
+	sub, err := hw.client.pubsubMux.subscribe(hw.channel, false, hw.processField)
+	if err != nil {
+		return err
 	}
+	hw.setSub(sub)
+	return nil
 }
 
 // StartWithSync subscribes, fetches current state, calls handlers, then processes messages.
 // This ensures no messages are missed between initial fetch and subscribe.
 // Order: Subscribe (messages buffer) → HGETALL → call handlers → process buffered messages
+//
+// The subscription rides the client's shared pub/sub connection, but the
+// ordering guarantee is unchanged and in fact stricter: subscribe()
+// returns only once Redis has confirmed the SUBSCRIBE, and the gated
+// subscriber buffers everything that arrives until release() below.
 func (hw *HashWatcher) StartWithSync() error {
-	// Subscribe first - messages will buffer in the channel
-	hw.pubsub = hw.client.redis.Subscribe(hw.client.ctx, hw.channel)
-
-	subscribed := make(chan struct{})
-	synced := make(chan struct{})
-	hw.client.wg.Add(1)
-	go func() {
-		defer hw.client.wg.Done()
-		ch := hw.pubsub.Channel()
-		close(subscribed)
-
-		// Wait for initial sync to complete before processing messages
-		<-synced
-
-		// Process messages (including any buffered during initial sync)
-		for msg := range ch {
-			hw.processField(msg.Payload)
-		}
-	}()
-
-	// Wait for subscription to be ready
-	select {
-	case <-subscribed:
-	case <-time.After(5 * time.Second):
-		close(synced)
-		return fmt.Errorf("subscription timeout for channel %s", hw.channel)
+	sub, err := hw.client.pubsubMux.subscribe(hw.channel, true, hw.processField)
+	if err != nil {
+		return err
 	}
+	hw.setSub(sub)
 
 	// Fetch current state and call handlers
 	ctx := hw.client.Context()
 	values, err := hw.client.redis.HGetAll(ctx, hw.hash).Result()
 	if err != nil && err != redis.Nil {
-		close(synced)
+		sub.release()
 		return fmt.Errorf("initial fetch failed: %w", err)
 	}
 
@@ -724,9 +695,15 @@ func (hw *HashWatcher) StartWithSync() error {
 	}
 
 	// Ungate message processing now that initial sync is done
-	close(synced)
+	sub.release()
 
 	return nil
+}
+
+func (hw *HashWatcher) setSub(s *pubsubSub) {
+	hw.subMu.Lock()
+	hw.sub = s
+	hw.subMu.Unlock()
 }
 
 // processField fetches and dispatches a field update, with optional debouncing.
@@ -814,12 +791,28 @@ func (hw *HashWatcher) dispatchField(field, value string) {
 	}
 }
 
-// Stop stops the watcher.
+// Stop stops the watcher. The underlying channel stays subscribed on the
+// shared connection if another watcher in this process still wants it.
 func (hw *HashWatcher) Stop() error {
-	if hw.pubsub != nil {
-		return hw.pubsub.Close()
+	hw.subMu.Lock()
+	sub := hw.sub
+	hw.sub = nil
+	hw.subMu.Unlock()
+
+	// Drop pending debounce timers so a stopped watcher cannot fire a
+	// handler after Stop returns.
+	hw.debounceMu.Lock()
+	for field, timer := range hw.debounceTimers {
+		timer.Stop()
+		delete(hw.debounceTimers, field)
+		delete(hw.debounceValues, field)
 	}
-	return nil
+	hw.debounceMu.Unlock()
+
+	if sub == nil {
+		return nil
+	}
+	return hw.client.pubsubMux.unsubscribe(sub)
 }
 
 // FetchAll retrieves all current values from the hash.
