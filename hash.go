@@ -228,6 +228,7 @@ func (hp *HashPublisher) SetMany(fields map[string]any, opts ...SetOption) error
 // Useful for batch updates where you only want one notification at the end.
 // The notification parameter is published as the message payload.
 // By default, this is async (fire-and-forget). Use Sync() for confirmation.
+// Use NoPublish() to skip the notification.
 func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification string, opts ...SetOption) error {
 	if len(fields) == 0 {
 		return nil
@@ -256,7 +257,9 @@ func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification s
 	for field, value := range fields {
 		pipe.HSet(ctx, hp.hash, field, stringify(value))
 	}
-	pipe.Publish(ctx, hp.channel, notification)
+	if cfg.publish {
+		pipe.Publish(ctx, hp.channel, notification)
+	}
 
 	if cfg.sync {
 		_, err := pipe.Exec(ctx)
@@ -332,6 +335,7 @@ func (hp *HashPublisher) SetManyIfChanged(fields map[string]any) ([]string, erro
 
 // SetWithTimestamp atomically sets a field, its timestamp, and publishes.
 // By default, this is async (fire-and-forget). Use Sync() for confirmation.
+// Use NoPublish() to skip publishing.
 func (hp *HashPublisher) SetWithTimestamp(field string, value any, opts ...SetOption) error {
 	cfg := defaultSetConfig()
 	for _, opt := range opts {
@@ -359,7 +363,9 @@ func (hp *HashPublisher) SetWithTimestamp(field string, value any, opts ...SetOp
 	pipe := hp.client.redis.Pipeline()
 	pipe.HSet(ctx, hp.hash, field, strVal)
 	pipe.HSet(ctx, hp.hash, tsField, ts)
-	pipe.Publish(ctx, hp.channel, field)
+	if cfg.publish {
+		pipe.Publish(ctx, hp.channel, field)
+	}
 
 	if cfg.sync {
 		_, err := pipe.Exec(ctx)
@@ -401,8 +407,10 @@ func (hp *HashPublisher) Channel() string {
 	return hp.channel
 }
 
-// Delete removes a field from the hash and publishes notification.
+// Delete removes a field from the hash and publishes the field name.
 // By default, this is async (fire-and-forget). Use Sync() for confirmation.
+// Use NoPublish() to skip publishing — useful when retiring a field that
+// no consumer should be woken for.
 func (hp *HashPublisher) Delete(field string, opts ...SetOption) error {
 	cfg := defaultSetConfig()
 	for _, opt := range opts {
@@ -418,7 +426,9 @@ func (hp *HashPublisher) Delete(field string, opts ...SetOption) error {
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.HDel(ctx, hp.hash, field)
-	pipe.Publish(ctx, hp.channel, field)
+	if cfg.publish {
+		pipe.Publish(ctx, hp.channel, field)
+	}
 
 	if cfg.sync {
 		_, err := pipe.Exec(ctx)
@@ -440,8 +450,9 @@ func (hp *HashPublisher) Delete(field string, opts ...SetOption) error {
 	return nil
 }
 
-// Clear deletes the entire hash and publishes "cleared" notification.
+// Clear deletes the entire hash and publishes "cleared".
 // By default, this is async (fire-and-forget). Use Sync() for confirmation.
+// Use NoPublish() to skip publishing.
 func (hp *HashPublisher) Clear(opts ...SetOption) error {
 	cfg := defaultSetConfig()
 	for _, opt := range opts {
@@ -457,7 +468,9 @@ func (hp *HashPublisher) Clear(opts ...SetOption) error {
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
 	pipe.Del(ctx, hp.hash)
-	pipe.Publish(ctx, hp.channel, "cleared")
+	if cfg.publish {
+		pipe.Publish(ctx, hp.channel, "cleared")
+	}
 
 	if cfg.sync {
 		_, err := pipe.Exec(ctx)
@@ -485,8 +498,9 @@ func (hp *HashPublisher) Clear(opts ...SetOption) error {
 
 // ReplaceAll atomically deletes all fields and sets new ones.
 // This solves the race condition in DEL + HMSET + PUBLISH patterns.
-// If fields is nil or empty, just deletes and publishes "cleared".
+// Publishes "replaced", or "cleared" if fields is nil or empty.
 // By default, this is async (fire-and-forget). Use Sync() for confirmation.
+// Use NoPublish() to skip publishing.
 func (hp *HashPublisher) ReplaceAll(fields map[string]any, opts ...SetOption) error {
 	cfg := defaultSetConfig()
 	for _, opt := range opts {
@@ -506,13 +520,15 @@ func (hp *HashPublisher) ReplaceAll(fields map[string]any, opts ...SetOption) er
 	pipe := hp.client.redis.Pipeline()
 	pipe.Del(ctx, hp.hash)
 
+	notification := "cleared"
 	if len(fields) > 0 {
 		for field, value := range fields {
 			pipe.HSet(ctx, hp.hash, field, stringify(value))
 		}
-		pipe.Publish(ctx, hp.channel, "replaced")
-	} else {
-		pipe.Publish(ctx, hp.channel, "cleared")
+		notification = "replaced"
+	}
+	if cfg.publish {
+		pipe.Publish(ctx, hp.channel, notification)
 	}
 
 	if cfg.sync {

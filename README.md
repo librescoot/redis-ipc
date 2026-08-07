@@ -186,9 +186,12 @@ vehicle.ReplaceAll(map[string]any{
     "speed": 0,
 })
 
-// Set without publishing (silent update)
+// Set without publishing (silent update). NoPublish() works on every
+// HashPublisher method that takes options, including the destructive ones:
 vehicle.Set("internal-state", "value", ipc.NoPublish())
 vehicle.SetMany(fields, ipc.NoPublish())
+vehicle.Delete("retired-field", ipc.NoPublish())   // retire a field quietly
+vehicle.Clear(ipc.NoPublish())
 
 // Batch update with single notification
 vehicle.SetManyPublishOne(map[string]any{

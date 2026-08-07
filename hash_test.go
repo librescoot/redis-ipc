@@ -1215,3 +1215,138 @@ done:
 	// Cleanup
 	client.Del(hash)
 }
+
+// TestHashPublisherNoPublishAllMethods covers every HashPublisher method
+// that accepts SetOption. Set and SetMany honoured NoPublish() from the
+// start; the other five built a setConfig and then published anyway, so
+// callers retiring a field or clearing a hash woke consumers they had
+// explicitly asked not to wake.
+func TestHashPublisherNoPublishAllMethods(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	cases := []struct {
+		name string
+		call func(pub *HashPublisher) error
+	}{
+		{"Set", func(pub *HashPublisher) error {
+			return pub.Set("field", "value", NoPublish(), Sync())
+		}},
+		{"SetMany", func(pub *HashPublisher) error {
+			return pub.SetMany(map[string]any{"a": "1", "b": "2"}, NoPublish(), Sync())
+		}},
+		{"SetManyPublishOne", func(pub *HashPublisher) error {
+			return pub.SetManyPublishOne(map[string]any{"a": "1"}, "batch", NoPublish(), Sync())
+		}},
+		{"SetWithTimestamp", func(pub *HashPublisher) error {
+			return pub.SetWithTimestamp("field", "value", NoPublish(), Sync())
+		}},
+		{"Delete", func(pub *HashPublisher) error {
+			if err := pub.Set("field", "value", NoPublish(), Sync()); err != nil {
+				return err
+			}
+			return pub.Delete("field", NoPublish(), Sync())
+		}},
+		{"Clear", func(pub *HashPublisher) error {
+			if err := pub.Set("field", "value", NoPublish(), Sync()); err != nil {
+				return err
+			}
+			return pub.Clear(NoPublish(), Sync())
+		}},
+		{"ReplaceAll", func(pub *HashPublisher) error {
+			return pub.ReplaceAll(map[string]any{"a": "1"}, NoPublish(), Sync())
+		}},
+		{"ReplaceAllEmpty", func(pub *HashPublisher) error {
+			return pub.ReplaceAll(nil, NoPublish(), Sync())
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hash := "test:nopub:" + tc.name + ":" + time.Now().Format(time.RFC3339Nano)
+			defer client.Del(hash)
+			pub := client.NewHashPublisher(hash)
+
+			pubsub := client.Raw().Subscribe(client.Context(), hash)
+			defer pubsub.Close()
+			ch := pubsub.Channel()
+			time.Sleep(100 * time.Millisecond) // let the subscription land
+
+			if err := tc.call(pub); err != nil {
+				t.Fatalf("%s with NoPublish failed: %v", tc.name, err)
+			}
+
+			select {
+			case msg := <-ch:
+				t.Errorf("%s published %q despite NoPublish()", tc.name, msg.Payload)
+			case <-time.After(300 * time.Millisecond):
+				// Expected: silence.
+			}
+		})
+	}
+}
+
+// TestHashPublisherPublishesByDefault is the other half of the above: the
+// same methods must still notify when NoPublish() is absent, so the fix
+// cannot regress into "never publishes".
+func TestHashPublisherPublishesByDefault(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	cases := []struct {
+		name string
+		want string
+		call func(pub *HashPublisher) error
+	}{
+		{"SetManyPublishOne", "batch", func(pub *HashPublisher) error {
+			return pub.SetManyPublishOne(map[string]any{"a": "1"}, "batch", Sync())
+		}},
+		{"SetWithTimestamp", "field", func(pub *HashPublisher) error {
+			return pub.SetWithTimestamp("field", "value", Sync())
+		}},
+		{"Delete", "field", func(pub *HashPublisher) error {
+			return pub.Delete("field", Sync())
+		}},
+		{"Clear", "cleared", func(pub *HashPublisher) error {
+			return pub.Clear(Sync())
+		}},
+		{"ReplaceAll", "replaced", func(pub *HashPublisher) error {
+			return pub.ReplaceAll(map[string]any{"a": "1"}, Sync())
+		}},
+		{"ReplaceAllEmpty", "cleared", func(pub *HashPublisher) error {
+			return pub.ReplaceAll(nil, Sync())
+		}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hash := "test:pub:" + tc.name + ":" + time.Now().Format(time.RFC3339Nano)
+			defer client.Del(hash)
+			pub := client.NewHashPublisher(hash)
+
+			pubsub := client.Raw().Subscribe(client.Context(), hash)
+			defer pubsub.Close()
+			ch := pubsub.Channel()
+			time.Sleep(100 * time.Millisecond)
+
+			if err := tc.call(pub); err != nil {
+				t.Fatalf("%s failed: %v", tc.name, err)
+			}
+
+			select {
+			case msg := <-ch:
+				if msg.Payload != tc.want {
+					t.Errorf("%s published %q, want %q", tc.name, msg.Payload, tc.want)
+				}
+			case <-time.After(2 * time.Second):
+				t.Errorf("%s published nothing, want %q", tc.name, tc.want)
+			}
+		})
+	}
+}
