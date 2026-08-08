@@ -175,8 +175,6 @@ type Client struct {
 	asyncWg     sync.WaitGroup // tracks fire-and-forget goroutines
 	connected   bool
 	connMu      sync.RWMutex
-	subGroups   sync.Map
-	reqHandlers sync.Map
 	hashPubs    sync.Map // cached HashPublisher instances
 
 	// Shared connections. Every channel subscription in the process

@@ -930,7 +930,7 @@ func TestHashPublisherGetAll(t *testing.T) {
 	}
 
 	// Get nonexistent field
-	val, err = pub.Get("nonexistent")
+	_, err = pub.Get("nonexistent")
 	if err == nil {
 		t.Error("Get(nonexistent) should return error")
 	}
