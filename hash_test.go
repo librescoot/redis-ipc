@@ -32,7 +32,7 @@ func TestHashPublisher(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashPublisherSetIfChanged(t *testing.T) {
@@ -74,7 +74,7 @@ func TestHashPublisherSetIfChanged(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashPublisherSetMany(t *testing.T) {
@@ -117,7 +117,7 @@ func TestHashPublisherSetMany(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashPublisherSetManyIfChanged(t *testing.T) {
@@ -161,7 +161,7 @@ func TestHashPublisherSetManyIfChanged(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashWatcher(t *testing.T) {
@@ -208,7 +208,7 @@ func TestHashWatcher(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashWatcherCatchAll(t *testing.T) {
@@ -259,7 +259,7 @@ func TestHashWatcherCatchAll(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashWatcherOnEvent(t *testing.T) {
@@ -324,7 +324,7 @@ func TestHashWatcherOnEvent(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(channel)
+	_, _ = client.Del(channel)
 }
 
 func TestFaultSet(t *testing.T) {
@@ -379,7 +379,7 @@ func TestFaultSet(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(setKey)
+	_, _ = client.Del(setKey)
 }
 
 func TestFaultSetMany(t *testing.T) {
@@ -417,7 +417,7 @@ func TestFaultSetMany(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(setKey)
+	_, _ = client.Del(setKey)
 }
 
 func TestHashPublisherSetWithTimestamp(t *testing.T) {
@@ -451,7 +451,7 @@ func TestHashPublisherSetWithTimestamp(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashWatcherStartWithSync(t *testing.T) {
@@ -529,7 +529,7 @@ func TestHashWatcherStartWithSync(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashWatcherDebounce(t *testing.T) {
@@ -592,7 +592,7 @@ func TestHashWatcherDebounce(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashPublisherDelete(t *testing.T) {
@@ -634,7 +634,7 @@ func TestHashPublisherDelete(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashPublisherClear(t *testing.T) {
@@ -673,7 +673,7 @@ func TestHashPublisherClear(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashPublisherReplaceAll(t *testing.T) {
@@ -738,7 +738,7 @@ func TestHashPublisherReplaceAll(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashPublisherNoPublish(t *testing.T) {
@@ -782,7 +782,7 @@ func TestHashPublisherNoPublish(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashPublisherSetManyNoPublish(t *testing.T) {
@@ -829,7 +829,7 @@ func TestHashPublisherSetManyNoPublish(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashPublisherSetManyPublishOne(t *testing.T) {
@@ -889,7 +889,7 @@ done:
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashPublisherGetAll(t *testing.T) {
@@ -948,7 +948,7 @@ func TestHashPublisherGetAll(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestHashWatcherFetch(t *testing.T) {
@@ -1000,7 +1000,7 @@ func TestHashWatcherFetch(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestOnFieldTyped(t *testing.T) {
@@ -1053,7 +1053,7 @@ func TestOnFieldTyped(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestAsyncSetCompletesBeforeClose(t *testing.T) {
@@ -1095,7 +1095,7 @@ func TestAsyncSetCompletesBeforeClose(t *testing.T) {
 	}
 
 	// Cleanup
-	client2.Del(hash)
+	_, _ = client2.Del(hash)
 }
 
 func TestStartWithSyncGate(t *testing.T) {
@@ -1156,7 +1156,7 @@ func TestStartWithSyncGate(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestDebounceRapidUpdates(t *testing.T) {
@@ -1189,9 +1189,13 @@ func TestDebounceRapidUpdates(t *testing.T) {
 
 	// Send many rapid updates - debounce should coalesce to "final"
 	for i := 0; i < 20; i++ {
-		pub.Set("state", "intermediate", Sync())
+		if err := pub.Set("state", "intermediate", Sync()); err != nil {
+			t.Fatalf("Set(intermediate, %d): %v", i, err)
+		}
 	}
-	pub.Set("state", "final", Sync())
+	if err := pub.Set("state", "final", Sync()); err != nil {
+		t.Fatalf("Set(final): %v", err)
+	}
 
 	// Wait for debounce
 	time.Sleep(300 * time.Millisecond)
@@ -1213,7 +1217,7 @@ done:
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 // TestHashPublisherNoPublishAllMethods covers every HashPublisher method

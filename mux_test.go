@@ -40,7 +40,9 @@ func blockedClients(t *testing.T, c *Client) int {
 		line = strings.TrimSpace(line)
 		if v, ok := strings.CutPrefix(line, "blocked_clients:"); ok {
 			var n int
-			fmt.Sscanf(v, "%d", &n)
+			if _, err := fmt.Sscanf(v, "%d", &n); err != nil {
+				t.Fatalf("parse blocked_clients %q: %v", v, err)
+			}
 			return n
 		}
 	}

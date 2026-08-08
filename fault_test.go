@@ -400,11 +400,15 @@ func TestFaultReporterConcurrentRaiseClear(t *testing.T) {
 		wg.Add(2)
 		go func(code int) {
 			defer wg.Done()
-			fr.Raise(code, "c"+strconv.Itoa(code))
+			if err := fr.Raise(code, "c"+strconv.Itoa(code)); err != nil {
+				t.Errorf("Raise(%d): %v", code, err)
+			}
 		}(i)
 		go func(code int) {
 			defer wg.Done()
-			fr.Clear(code)
+			if err := fr.Clear(code); err != nil {
+				t.Errorf("Clear(%d): %v", code, err)
+			}
 		}(i)
 	}
 	wg.Wait()

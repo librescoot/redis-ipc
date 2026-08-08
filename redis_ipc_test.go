@@ -70,7 +70,7 @@ func TestGetSet(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(key)
+	_, _ = client.Del(key)
 }
 
 func TestHGetHSet(t *testing.T) {
@@ -107,7 +107,7 @@ func TestHGetHSet(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(key)
+	_, _ = client.Del(key)
 }
 
 func TestSubscribeTyped(t *testing.T) {
@@ -221,7 +221,7 @@ func TestTxGroup(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(key)
+	_, _ = client.Del(key)
 }
 
 func TestRouter(t *testing.T) {
@@ -419,7 +419,7 @@ func TestHash(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(hash)
+	_, _ = client.Del(hash)
 }
 
 func TestWithContext(t *testing.T) {
@@ -458,5 +458,5 @@ func TestWithContext(t *testing.T) {
 	}
 
 	// Cleanup
-	client.Del(key)
+	_, _ = client.Del(key)
 }
