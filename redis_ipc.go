@@ -218,10 +218,9 @@ func New(opts ...Option) (*Client, error) {
 		return nil, fmt.Errorf("redis connect failed: %w", err)
 	}
 
+	// setConnected fires onConnect itself on the false -> true edge, so
+	// calling o.onConnect here as well would deliver the first connect twice.
 	c.setConnected(true)
-	if o.onConnect != nil {
-		o.onConnect()
-	}
 
 	c.wg.Add(1)
 	go c.monitorConnection()

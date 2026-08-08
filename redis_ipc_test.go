@@ -20,18 +20,30 @@ func TestNew(t *testing.T) {
 }
 
 func TestNewWithCallbacks(t *testing.T) {
-	connectCalled := false
+	// Counted rather than a bool: New used to call onConnect explicitly on
+	// top of the call setConnected already makes, and a bool cannot tell one
+	// delivery from two.
+	var mu sync.Mutex
+	connectCalls := 0
 	client, err := New(
 		WithAddress("localhost"),
-		WithOnConnect(func() { connectCalled = true }),
+		WithOnConnect(func() {
+			mu.Lock()
+			connectCalls++
+			mu.Unlock()
+		}),
 	)
 	if err != nil {
 		t.Fatalf("New() failed: %v", err)
 	}
 	defer client.Close()
 
-	if !connectCalled {
-		t.Error("Expected onConnect callback to be called")
+	mu.Lock()
+	got := connectCalls
+	mu.Unlock()
+
+	if got != 1 {
+		t.Errorf("onConnect called %d times, want exactly 1", got)
 	}
 }
 
