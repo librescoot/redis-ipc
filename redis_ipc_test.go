@@ -20,9 +20,7 @@ func TestNew(t *testing.T) {
 }
 
 func TestNewWithCallbacks(t *testing.T) {
-	// Counted rather than a bool: New used to call onConnect explicitly on
-	// top of the call setConnected already makes, and a bool cannot tell one
-	// delivery from two.
+	// Counted, not a bool: a bool cannot tell one delivery from two.
 	var mu sync.Mutex
 	connectCalls := 0
 	client, err := New(
