@@ -422,6 +422,37 @@ func TestHash(t *testing.T) {
 	_, _ = client.Del(hash)
 }
 
+func TestHSetConvergedStatus(t *testing.T) {
+	client, err := New(WithAddress("localhost"))
+	if err != nil {
+		t.Fatalf("New() failed: %v", err)
+	}
+	defer client.Close()
+
+	hash := "test:converged:" + time.Now().Format(time.RFC3339Nano)
+	defer client.Del(hash)
+
+	if got, err := client.HSetConvergedStatus(hash, "provider-a", "connected", "status", "connected", "disconnected"); err != nil || got != "connected" {
+		t.Fatalf("first update = %q, %v; want connected", got, err)
+	}
+	if got, err := client.HSetConvergedStatus(hash, "provider-b", "connected", "status", "connected", "disconnected"); err != nil || got != "connected" {
+		t.Fatalf("second update = %q, %v; want connected", got, err)
+	}
+	if got, err := client.HSetConvergedStatus(hash, "provider-a", "disconnected", "status", "connected", "disconnected"); err != nil || got != "connected" {
+		t.Fatalf("one provider remains = %q, %v; want connected", got, err)
+	}
+	if got, err := client.HSetConvergedStatus(hash, "provider-b", "disconnected", "status", "connected", "disconnected"); err != nil || got != "disconnected" {
+		t.Fatalf("all providers disconnected = %q, %v; want disconnected", got, err)
+	}
+	fields, err := client.HGetAll(hash)
+	if err != nil {
+		t.Fatalf("HGetAll() failed: %v", err)
+	}
+	if fields["provider-a"] != "disconnected" || fields["provider-b"] != "disconnected" || fields["status"] != "disconnected" {
+		t.Fatalf("unexpected converged hash: %#v", fields)
+	}
+}
+
 func TestWithContext(t *testing.T) {
 	client, err := New(WithAddress("localhost"))
 	if err != nil {

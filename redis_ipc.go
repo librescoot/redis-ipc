@@ -167,15 +167,15 @@ func WithURL(rawURL string) Option {
 
 // Client is the main Redis IPC client
 type Client struct {
-	opts        *options
-	redis       *redis.Client
-	ctx         context.Context
-	cancel      context.CancelFunc
-	wg          sync.WaitGroup
-	asyncWg     sync.WaitGroup // tracks fire-and-forget goroutines
-	connected   bool
-	connMu      sync.RWMutex
-	hashPubs    sync.Map // cached HashPublisher instances
+	opts      *options
+	redis     *redis.Client
+	ctx       context.Context
+	cancel    context.CancelFunc
+	wg        sync.WaitGroup
+	asyncWg   sync.WaitGroup // tracks fire-and-forget goroutines
+	connected bool
+	connMu    sync.RWMutex
+	hashPubs  sync.Map // cached HashPublisher instances
 
 	// Shared connections. Every channel subscription in the process
 	// rides one pub/sub connection, every queue consumer one BRPOP
@@ -634,6 +634,45 @@ func (c *Client) HSet(key, field string, value interface{}) error {
 // HGetAll retrieves all fields and values of a hash
 func (c *Client) HGetAll(key string) (map[string]string, error) {
 	return c.redis.HGetAll(c.Context(), key).Result()
+}
+
+const hSetConvergedStatusScript = `
+local oldField = redis.call('HGET', KEYS[1], ARGV[1])
+redis.call('HSET', KEYS[1], ARGV[1], ARGV[2])
+local fields = redis.call('HGETALL', KEYS[1])
+local aggregate = ARGV[5]
+for i = 1, #fields, 2 do
+  if fields[i] ~= ARGV[3] and fields[i + 1] == ARGV[4] then
+    aggregate = ARGV[4]
+    break
+  end
+end
+local oldAggregate = redis.call('HGET', KEYS[1], ARGV[3])
+redis.call('HSET', KEYS[1], ARGV[3], aggregate)
+if oldField ~= ARGV[2] then
+  redis.call('PUBLISH', KEYS[1], ARGV[1])
+end
+if oldAggregate ~= aggregate then
+  redis.call('PUBLISH', KEYS[1], ARGV[3])
+end
+return aggregate
+`
+
+// HSetConvergedStatus atomically writes one contributor field and recomputes
+// an aggregate field from the whole hash. The aggregate is activeValue when
+// any contributor (every field except aggregateField) has activeValue;
+// otherwise it is inactiveValue. Changed fields are published on the hash's
+// conventional pub/sub channel before the script returns.
+func (c *Client) HSetConvergedStatus(key, field, value, aggregateField, activeValue, inactiveValue string) (string, error) {
+	if field == "" || aggregateField == "" || field == aggregateField {
+		return "", fmt.Errorf("contributor and aggregate fields must be non-empty and distinct")
+	}
+	result, err := c.redis.Eval(c.Context(), hSetConvergedStatusScript, []string{key},
+		field, value, aggregateField, activeValue, inactiveValue).Text()
+	if err != nil {
+		return "", err
+	}
+	return result, nil
 }
 
 // LPush inserts values at the head of a list
