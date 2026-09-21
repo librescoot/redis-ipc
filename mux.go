@@ -20,7 +20,9 @@ package redis_ipc
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"sync"
 	"time"
@@ -507,9 +509,16 @@ func (m *queueMux) run() {
 			if m.client.ctx.Err() != nil || m.isClosed() {
 				return
 			}
-			// Transient read errors (e.g. i/o timeout during brief Redis
-			// stalls) are expected here; nothing is lost, the messages
-			// stay in Redis until the next BRPOP.
+			// A read timeout on the blocking BRPOP means Redis did not
+			// answer within brpopBlockingTimeout plus the go-redis read
+			// grace. go-redis retires the connection, the next BRPOP
+			// re-dials, and any command still belongs to its list, so
+			// this is the expected shape of a loaded or briefly stalled
+			// Redis rather than an actionable error.
+			if isTimeoutError(err) {
+				m.client.opts.logger.Debug("BRPOP read timeout, retrying", "error", err)
+				continue
+			}
 			m.client.opts.logger.Warn("BRPOP error, retrying", "error", err, "delay", "5s")
 			select {
 			case <-m.client.ctx.Done():
@@ -523,6 +532,15 @@ func (m *queueMux) run() {
 		}
 		m.dispatch(result[0], result[1])
 	}
+}
+
+// isTimeoutError reports whether err is a network timeout, the form a
+// blocking BRPOP read takes when Redis does not reply in time. Context
+// deadlines surface as context.DeadlineExceeded; those are checked
+// separately by the callers before they reach here.
+func isTimeoutError(err error) bool {
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
 func (m *queueMux) dispatch(queue, payload string) {

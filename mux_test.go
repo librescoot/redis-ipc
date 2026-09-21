@@ -774,3 +774,23 @@ func TestSubscribeAfterCloseFails(t *testing.T) {
 		t.Error("Start() on a closed client should fail")
 	}
 }
+
+// timeoutErr is the shape a blocking BRPOP read takes when Redis does not
+// reply within the client read deadline.
+type timeoutErr struct{}
+
+func (timeoutErr) Error() string   { return "read tcp 127.0.0.1:1->127.0.0.1:6379: i/o timeout" }
+func (timeoutErr) Timeout() bool   { return true }
+func (timeoutErr) Temporary() bool { return false }
+
+func TestIsTimeoutError(t *testing.T) {
+	if !isTimeoutError(timeoutErr{}) {
+		t.Error("network timeout not recognised")
+	}
+	if !isTimeoutError(fmt.Errorf("brpop: %w", timeoutErr{})) {
+		t.Error("wrapped network timeout not recognised")
+	}
+	if isTimeoutError(fmt.Errorf("dial tcp: connection refused")) {
+		t.Error("non-timeout error misread as timeout")
+	}
+}
