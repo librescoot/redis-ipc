@@ -559,8 +559,10 @@ watcher.StartWithSync()
 
 ## License
 
-This project is dual-licensed. The source code is available under the
-[GNU Affero General Public License v3.0][agpl-3.0].
+Original Librescoot code in this repository is available, at your option, under
+[AGPL-3.0-only](LICENSE) or [CC-BY-NC-SA-4.0](LICENSE.CC-BY-NC-SA-4.0).
+Third-party code retains its existing license.
+
 The maintainers reserve the right to grant separate licenses for commercial distribution; please contact the maintainers to discuss commercial licensing.
 
 [![AGPL v3][agpl-image]][agpl-3.0]
