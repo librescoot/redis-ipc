@@ -196,10 +196,9 @@ func (hp *HashPublisher) SetMany(fields map[string]any, opts ...SetOption) error
 
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
-	for field, value := range fields {
-		strVal := stringify(value)
-		pipe.HSet(ctx, hp.hash, field, strVal)
-		if cfg.publish {
+	queueHSet(ctx, pipe, hp.hash, fields)
+	if cfg.publish {
+		for field := range fields {
 			pipe.Publish(ctx, hp.channel, field)
 		}
 	}
@@ -254,9 +253,7 @@ func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification s
 
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
-	for field, value := range fields {
-		pipe.HSet(ctx, hp.hash, field, stringify(value))
-	}
+	queueHSet(ctx, pipe, hp.hash, fields)
 	if cfg.publish {
 		pipe.Publish(ctx, hp.channel, notification)
 	}
@@ -279,6 +276,20 @@ func (hp *HashPublisher) SetManyPublishOne(fields map[string]any, notification s
 		}
 	}()
 	return nil
+}
+
+// queueHSet queues one HSET carrying every field. A batch costs a single Redis
+// command instead of one per field, which matters on the scooter's MDB where
+// the server's CPU time goes mostly into command handling.
+func queueHSet[V any](ctx context.Context, pipe redis.Pipeliner, hash string, fields map[string]V) {
+	if len(fields) == 0 {
+		return
+	}
+	args := make([]any, 0, 2*len(fields))
+	for field, value := range fields {
+		args = append(args, field, stringify(value))
+	}
+	pipe.HSet(ctx, hash, args...)
 }
 
 // SetManyIfChanged atomically sets multiple fields, publishing only changed ones.
@@ -306,9 +317,7 @@ func (hp *HashPublisher) SetManyIfChanged(fields map[string]any) ([]string, erro
 	pipe := hp.client.redis.Pipeline()
 
 	// Set all fields (even unchanged, for consistency)
-	for field, value := range fields {
-		pipe.HSet(ctx, hp.hash, field, stringify(value))
-	}
+	queueHSet(ctx, pipe, hp.hash, fields)
 
 	// Only publish changed fields
 	for field := range changed {
@@ -361,8 +370,7 @@ func (hp *HashPublisher) SetWithTimestamp(field string, value any, opts ...SetOp
 
 	ctx := hp.client.Context()
 	pipe := hp.client.redis.Pipeline()
-	pipe.HSet(ctx, hp.hash, field, strVal)
-	pipe.HSet(ctx, hp.hash, tsField, ts)
+	pipe.HSet(ctx, hp.hash, field, strVal, tsField, ts)
 	if cfg.publish {
 		pipe.Publish(ctx, hp.channel, field)
 	}
@@ -522,9 +530,7 @@ func (hp *HashPublisher) ReplaceAll(fields map[string]any, opts ...SetOption) er
 
 	notification := "cleared"
 	if len(fields) > 0 {
-		for field, value := range fields {
-			pipe.HSet(ctx, hp.hash, field, stringify(value))
-		}
+		queueHSet(ctx, pipe, hp.hash, fields)
 		notification = "replaced"
 	}
 	if cfg.publish {
@@ -947,9 +953,7 @@ func (hp *HashPublisher) queueSetManyIfChanged(ctx context.Context, pipe redis.P
 	}
 	hp.mu.Unlock()
 
-	for field, strVal := range stringified {
-		pipe.HSet(ctx, hp.hash, field, strVal)
-	}
+	queueHSet(ctx, pipe, hp.hash, stringified)
 	for _, field := range changedFields {
 		pipe.Publish(ctx, hp.channel, field)
 	}
