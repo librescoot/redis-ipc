@@ -422,6 +422,8 @@ Nothing about this is visible in the API: `Start()`, `Stop()`, `HandleRequests` 
 - `Stop()` on one watcher only unsubscribes the underlying channel if no other watcher in the process still wants it.
 - `HashWatcher.StartWithSync()` re-reads the hash when its Pub/Sub subscription reconnects. Notifications received during the read are delivered afterwards. Previously observed fields that disappeared are dispatched with an empty value. Event-only notifications cannot be recovered. `Start()` retains its event-only behavior and does not re-read the hash.
 
+For `localhost` and loopback IP addresses, an idle Pub/Sub connection is checked every 30 seconds instead of every 3 seconds. The client connection monitor also uses 30 seconds instead of 5 unless `WithRetryInterval`, `WithOnConnect` or `WithOnDisconnect` is set. Explicit intervals and callback detection timing are unchanged. Other addresses retain the 3- and 5-second defaults, including the DBC-to-MDB link.
+
 ## Configuration Options
 
 ```go

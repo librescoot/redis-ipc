@@ -146,7 +146,7 @@ func (m *pubsubMux) subscribe(channel string, gated bool, handler func(payload s
 	if m.pubsub == nil {
 		m.pubsub = m.client.redis.Subscribe(m.client.ctx)
 		m.client.wg.Add(1)
-		go m.run(m.pubsub.ChannelWithSubscriptions())
+		go m.run(m.pubsub.ChannelWithSubscriptions(redis.WithChannelHealthCheckInterval(m.client.opts.pubsubCheckInterval)))
 	}
 
 	existing := m.subs[channel]

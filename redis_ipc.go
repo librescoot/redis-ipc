@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -59,28 +60,31 @@ func (StringCodec) Decode(data []byte, v any) error {
 
 // options holds client configuration
 type options struct {
-	address       string
-	port          int
-	retryInterval time.Duration
-	maxRetries    int
-	poolSize      int
-	dialTimeout   time.Duration
-	logger        *slog.Logger
-	codec         Codec
-	onConnect     func()
-	onDisconnect  func(error)
+	address             string
+	port                int
+	retryInterval       time.Duration
+	retryIntervalSet    bool
+	pubsubCheckInterval time.Duration
+	maxRetries          int
+	poolSize            int
+	dialTimeout         time.Duration
+	logger              *slog.Logger
+	codec               Codec
+	onConnect           func()
+	onDisconnect        func(error)
 }
 
 func defaultOptions() *options {
 	return &options{
-		address:       "localhost",
-		port:          6379,
-		retryInterval: 5 * time.Second,
-		maxRetries:    3,
-		poolSize:      3,
-		dialTimeout:   2 * time.Second,
-		logger:        slog.New(slog.NewTextHandler(os.Stderr, nil)),
-		codec:         JSONCodec{},
+		address:             "localhost",
+		port:                6379,
+		retryInterval:       5 * time.Second,
+		pubsubCheckInterval: 3 * time.Second,
+		maxRetries:          3,
+		poolSize:            3,
+		dialTimeout:         2 * time.Second,
+		logger:              slog.New(slog.NewTextHandler(os.Stderr, nil)),
+		codec:               JSONCodec{},
 	}
 }
 
@@ -99,7 +103,7 @@ func WithPort(port int) Option {
 
 // WithRetryInterval sets the connection monitoring interval
 func WithRetryInterval(d time.Duration) Option {
-	return func(o *options) { o.retryInterval = d }
+	return func(o *options) { o.retryInterval = d; o.retryIntervalSet = true }
 }
 
 // WithMaxRetries sets the maximum number of retries for commands
@@ -165,6 +169,20 @@ func WithURL(rawURL string) Option {
 	}
 }
 
+// Loopback does not have a separate network link to fail silently. Keep a
+// slower health check for an unresponsive local server, while preserving the
+// existing interval for callers that use connection callbacks.
+func (o *options) configureHealthChecks() {
+	ip := net.ParseIP(o.address)
+	if !strings.EqualFold(o.address, "localhost") && (ip == nil || !ip.IsLoopback()) {
+		return
+	}
+	if !o.retryIntervalSet && o.onConnect == nil && o.onDisconnect == nil {
+		o.retryInterval = 30 * time.Second
+	}
+	o.pubsubCheckInterval = 30 * time.Second
+}
+
 // Client is the main Redis IPC client
 type Client struct {
 	opts      *options
@@ -190,6 +208,7 @@ func New(opts ...Option) (*Client, error) {
 	for _, opt := range opts {
 		opt(o)
 	}
+	o.configureHealthChecks()
 
 	ctx, cancel := context.WithCancel(context.Background())
 
