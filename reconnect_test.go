@@ -41,6 +41,62 @@ func reconnectRedis(t *testing.T) int {
 	return port
 }
 
+func TestReconnectDeliversNotificationsAfterSnapshot(t *testing.T) {
+	port := reconnectRedis(t)
+	client, err := New(WithAddress("127.0.0.1"), WithPort(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.HSet("ordering:test", "state", "old"); err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	updated := make(chan string, 10)
+	w := client.NewHashWatcher("ordering:test")
+	w.OnField("state", func(value string) error {
+		if value == "snapshot" {
+			close(entered)
+			<-release
+		}
+		updated <- value
+		return nil
+	})
+	if err := w.StartWithSync(); err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+	<-updated
+	if err := client.HSet("ordering:test", "state", "snapshot"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do("CLIENT", "KILL", "TYPE", "pubsub"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot not delivered")
+	}
+	if err := client.NewHashPublisher("ordering:test").Set("state", "live", Sync()); err != nil {
+		t.Fatal(err)
+	}
+	// The deferred close releases the blocked callback after the test starts
+	// consuming its values; explicitly release it here for the ordering check.
+	release <- struct{}{}
+	for _, want := range []string{"snapshot", "live"} {
+		select {
+		case got := <-updated:
+			if got != want {
+				t.Fatalf("got %q, want %q", got, want)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatalf("missing %q", want)
+		}
+	}
+}
+
 func TestReconnectRetriesFailedSnapshot(t *testing.T) {
 	port := reconnectRedis(t)
 	client, err := New(WithAddress("127.0.0.1"), WithPort(port))
