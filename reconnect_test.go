@@ -157,15 +157,20 @@ func TestHashWatchersResyncAfterPubsubReconnect(t *testing.T) {
 	if err := client.HSet("reconnect:test", "deleted", "present"); err != nil {
 		t.Fatal(err)
 	}
+	if err := client.HSet("reconnect:test", "unchanged", "open"); err != nil {
+		t.Fatal(err)
+	}
 
 	var mu sync.Mutex
 	got := map[string]string{}
+	fieldCalls := map[string]int{}
 	var calls int
 	w := client.NewHashWatcher("reconnect:test")
 	w.OnAny(func(field, value string) error {
 		mu.Lock()
 		defer mu.Unlock()
 		got[field] = value
+		fieldCalls[field]++
 		calls++
 		return nil
 	})
@@ -195,8 +200,8 @@ func TestHashWatchersResyncAfterPubsubReconnect(t *testing.T) {
 	mu.Lock()
 	initial := calls
 	mu.Unlock()
-	if initial != 2 {
-		t.Fatalf("initial callbacks = %d, want 2", initial)
+	if initial != 3 {
+		t.Fatalf("initial callbacks = %d, want 3", initial)
 	}
 
 	// Update the hash without publishing, then disconnect the subscription.
@@ -221,6 +226,12 @@ func TestHashWatchersResyncAfterPubsubReconnect(t *testing.T) {
 		mu.Lock()
 		defer mu.Unlock()
 		t.Fatalf("reconnect snapshot missing: values=%v calls=%d", got, calls)
+	}
+	mu.Lock()
+	unchangedCalls := fieldCalls["unchanged"]
+	mu.Unlock()
+	if unchangedCalls != 1 {
+		t.Fatalf("unchanged field replayed %d times", unchangedCalls)
 	}
 	if got := eventsOnly.Load(); got != 0 {
 		t.Fatalf("Start watcher received %d snapshot callbacks", got)

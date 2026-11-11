@@ -571,7 +571,7 @@ type HashWatcher struct {
 	eventHandlers map[string]func() error
 	catchAll      func(field, value string) error
 	mu            sync.RWMutex
-	seenFields    map[string]bool
+	seenFields    map[string]string
 
 	sub   *pubsubSub
 	subMu sync.Mutex
@@ -590,7 +590,7 @@ func (c *Client) NewHashWatcher(hash string) *HashWatcher {
 		client:         c,
 		hash:           hash,
 		channel:        hash,
-		seenFields:     make(map[string]bool),
+		seenFields:     make(map[string]string),
 		handlers:       make(map[string]func(value string) error),
 		eventHandlers:  make(map[string]func() error),
 		debounceTimers: make(map[string]*time.Timer),
@@ -604,7 +604,7 @@ func (c *Client) NewHashWatcherWithChannel(hash, channel string) *HashWatcher {
 		client:         c,
 		hash:           hash,
 		channel:        channel,
-		seenFields:     make(map[string]bool),
+		seenFields:     make(map[string]string),
 		handlers:       make(map[string]func(value string) error),
 		eventHandlers:  make(map[string]func() error),
 		debounceTimers: make(map[string]*time.Timer),
@@ -708,8 +708,8 @@ func (hw *HashWatcher) StartWithSync() error {
 	hw.mu.RUnlock()
 
 	hw.mu.Lock()
-	for field := range values {
-		hw.seenFields[field] = true
+	for field, value := range values {
+		hw.seenFields[field] = value
 	}
 	hw.mu.Unlock()
 
@@ -740,17 +740,21 @@ func (hw *HashWatcher) resync() error {
 	}
 	hw.mu.Lock()
 	previous := hw.seenFields
-	hw.seenFields = make(map[string]bool, len(values))
-	for field := range values {
-		hw.seenFields[field] = true
+	hw.seenFields = make(map[string]string, len(values))
+	changed := make(map[string]string)
+	for field, value := range values {
+		hw.seenFields[field] = value
+		if old, seen := previous[field]; !seen || old != value {
+			changed[field] = value
+		}
 	}
 	for field := range previous {
 		if _, ok := values[field]; !ok {
-			values[field] = ""
+			changed[field] = ""
 		}
 	}
 	hw.mu.Unlock()
-	for field, value := range values {
+	for field, value := range changed {
 		if hw.debounce > 0 {
 			hw.processFieldDebounced(field, value)
 		} else {
@@ -796,7 +800,7 @@ func (hw *HashWatcher) processField(field string) {
 	if err == redis.Nil {
 		delete(hw.seenFields, field)
 	} else {
-		hw.seenFields[field] = true
+		hw.seenFields[field] = value
 	}
 	hw.mu.Unlock()
 	if hw.debounce > 0 {
