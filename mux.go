@@ -73,6 +73,7 @@ var ErrClientClosed = fmt.Errorf("redis-ipc: client is closed")
 type ackWaiter struct {
 	ch   chan struct{}
 	once sync.Once
+	seen bool // protected by pubsubMux.mu
 }
 
 func (a *ackWaiter) signal() { a.once.Do(func() { close(a.ch) }) }
@@ -90,12 +91,18 @@ type pubsubMux struct {
 	closed bool
 }
 
-type pubsubSub struct {
-	mux     *pubsubMux
-	channel string
-	handler func(payload string)
+type pubsubMessage struct {
+	payload string
+	resync  bool
+}
 
-	ch   chan string
+type pubsubSub struct {
+	mux         *pubsubMux
+	channel     string
+	handler     func(payload string)
+	onReconnect func() error
+
+	ch   chan pubsubMessage
 	gate chan struct{}
 	stop chan struct{}
 
@@ -116,13 +123,16 @@ func newPubsubMux(c *Client) *pubsubMux {
 // subscriber buffers incoming messages until release() is called.
 // StartWithSync needs that window to fetch current state before handlers
 // start seeing live updates.
-func (m *pubsubMux) subscribe(channel string, gated bool, handler func(payload string)) (*pubsubSub, error) {
+func (m *pubsubMux) subscribe(channel string, gated bool, handler func(payload string), onReconnect ...func() error) (*pubsubSub, error) {
 	s := &pubsubSub{
 		mux:     m,
 		channel: channel,
 		handler: handler,
-		ch:      make(chan string, pubsubBacklog),
+		ch:      make(chan pubsubMessage, pubsubBacklog),
 		stop:    make(chan struct{}),
+	}
+	if len(onReconnect) > 0 {
+		s.onReconnect = onReconnect[0]
 	}
 	if gated {
 		s.gate = make(chan struct{})
@@ -255,9 +265,20 @@ func (m *pubsubMux) run(ch <-chan any) {
 func (m *pubsubMux) ack(channel string) {
 	m.mu.Lock()
 	ack := m.acks[channel]
-	m.mu.Unlock()
+	var subs []*pubsubSub
 	if ack != nil {
-		ack.signal()
+		if ack.seen {
+			subs = m.subs[channel]
+		} else {
+			ack.seen = true
+			ack.signal()
+		}
+	}
+	m.mu.Unlock()
+	for _, s := range subs {
+		if s.onReconnect != nil {
+			s.deliverMessage(pubsubMessage{resync: true})
+		}
 	}
 }
 
@@ -298,8 +319,21 @@ func (m *pubsubMux) close() error {
 }
 
 func (s *pubsubSub) deliver(payload string) {
+	s.deliverMessage(pubsubMessage{payload: payload})
+}
+
+func (s *pubsubSub) deliverMessage(msg pubsubMessage) {
+	// Losing a reconnect marker could leave cached safety state stale forever.
+	if msg.resync {
+		select {
+		case s.ch <- msg:
+		case <-s.stop:
+		case <-s.mux.client.ctx.Done():
+		}
+		return
+	}
 	select {
-	case s.ch <- payload:
+	case s.ch <- msg:
 		return
 	case <-s.stop:
 		return
@@ -313,7 +347,7 @@ func (s *pubsubSub) deliver(payload string) {
 
 	for {
 		select {
-		case s.ch <- payload:
+		case s.ch <- msg:
 			return
 		case <-s.stop:
 			return
@@ -345,8 +379,28 @@ func (s *pubsubSub) run() {
 		select {
 		case <-s.stop:
 			return
-		case payload := <-s.ch:
-			s.handler(payload)
+		case msg := <-s.ch:
+			if !msg.resync {
+				s.handler(msg.payload)
+				continue
+			}
+			for {
+				if err := s.onReconnect(); err == nil {
+					break
+				} else {
+					s.mux.client.opts.logger.Warn("hash watcher reconnect sync failed", "channel", s.channel, "error", err)
+				}
+				timer := time.NewTimer(time.Second)
+				select {
+				case <-timer.C:
+				case <-s.stop:
+					timer.Stop()
+					return
+				case <-s.mux.client.ctx.Done():
+					timer.Stop()
+					return
+				}
+			}
 		}
 	}
 }

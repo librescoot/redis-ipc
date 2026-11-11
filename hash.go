@@ -571,6 +571,7 @@ type HashWatcher struct {
 	eventHandlers map[string]func() error
 	catchAll      func(field, value string) error
 	mu            sync.RWMutex
+	seenFields    map[string]bool
 
 	sub   *pubsubSub
 	subMu sync.Mutex
@@ -589,6 +590,7 @@ func (c *Client) NewHashWatcher(hash string) *HashWatcher {
 		client:         c,
 		hash:           hash,
 		channel:        hash,
+		seenFields:     make(map[string]bool),
 		handlers:       make(map[string]func(value string) error),
 		eventHandlers:  make(map[string]func() error),
 		debounceTimers: make(map[string]*time.Timer),
@@ -602,6 +604,7 @@ func (c *Client) NewHashWatcherWithChannel(hash, channel string) *HashWatcher {
 		client:         c,
 		hash:           hash,
 		channel:        channel,
+		seenFields:     make(map[string]bool),
 		handlers:       make(map[string]func(value string) error),
 		eventHandlers:  make(map[string]func() error),
 		debounceTimers: make(map[string]*time.Timer),
@@ -685,7 +688,7 @@ func (hw *HashWatcher) Start() error {
 // returns only once Redis has confirmed the SUBSCRIBE, and the gated
 // subscriber buffers everything that arrives until release() below.
 func (hw *HashWatcher) StartWithSync() error {
-	sub, err := hw.client.pubsubMux.subscribe(hw.channel, true, hw.processField)
+	sub, err := hw.client.pubsubMux.subscribe(hw.channel, true, hw.processField, hw.resync)
 	if err != nil {
 		return err
 	}
@@ -704,6 +707,12 @@ func (hw *HashWatcher) StartWithSync() error {
 	catchAll := hw.catchAll
 	hw.mu.RUnlock()
 
+	hw.mu.Lock()
+	for field := range values {
+		hw.seenFields[field] = true
+	}
+	hw.mu.Unlock()
+
 	for field, value := range values {
 		if handler, ok := handlers[field]; ok {
 			if err := handler(value); err != nil {
@@ -719,6 +728,35 @@ func (hw *HashWatcher) StartWithSync() error {
 	// Ungate message processing now that initial sync is done
 	sub.release()
 
+	return nil
+}
+
+// resync runs in subscriber order after Redis confirms a re-subscription.
+// Notifications arriving during the snapshot remain queued behind it.
+func (hw *HashWatcher) resync() error {
+	values, err := hw.client.redis.HGetAll(hw.client.Context(), hw.hash).Result()
+	if err != nil {
+		return err
+	}
+	hw.mu.Lock()
+	previous := hw.seenFields
+	hw.seenFields = make(map[string]bool, len(values))
+	for field := range values {
+		hw.seenFields[field] = true
+	}
+	for field := range previous {
+		if _, ok := values[field]; !ok {
+			values[field] = ""
+		}
+	}
+	hw.mu.Unlock()
+	for field, value := range values {
+		if hw.debounce > 0 {
+			hw.processFieldDebounced(field, value)
+		} else {
+			hw.dispatchField(field, value)
+		}
+	}
 	return nil
 }
 
@@ -754,6 +792,13 @@ func (hw *HashWatcher) processField(field string) {
 		}
 	}
 
+	hw.mu.Lock()
+	if err == redis.Nil {
+		delete(hw.seenFields, field)
+	} else {
+		hw.seenFields[field] = true
+	}
+	hw.mu.Unlock()
 	if hw.debounce > 0 {
 		hw.processFieldDebounced(field, value)
 	} else {

@@ -420,6 +420,7 @@ Nothing about this is visible in the API: `Start()`, `Stop()`, `HandleRequests` 
 
 - `WithPoolSize` no longer needs padding for blocking consumers. A service with eight command queues used to need `WithPoolSize(12)` just so its BRPOPs wouldn't exhaust the pool; the default of 3 is now fine.
 - `Stop()` on one watcher only unsubscribes the underlying channel if no other watcher in the process still wants it.
+- `HashWatcher.StartWithSync()` re-reads the hash when its Pub/Sub subscription reconnects. Notifications received during the read are delivered afterwards. Previously observed fields that disappeared are dispatched with an empty value. Event-only notifications cannot be recovered. `Start()` retains its event-only behavior and does not re-read the hash.
 
 ## Configuration Options
 
