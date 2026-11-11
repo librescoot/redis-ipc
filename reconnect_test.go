@@ -5,6 +5,7 @@ import (
 	"net"
 	"os/exec"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -67,9 +68,12 @@ func TestReconnectRetriesFailedSnapshot(t *testing.T) {
 	if _, err := client.Do("CLIENT", "KILL", "TYPE", "pubsub"); err != nil {
 		t.Fatal(err)
 	}
-	// Wait until the subscription is restored while the snapshot is denied.
-	if !waitFor(t, 5*time.Second, func() bool { return pubsubConnCount(t, client) == 1 }) {
-		t.Fatal("subscription did not reconnect")
+	// Confirm the reconnected watcher actually tried and failed the snapshot.
+	if !waitFor(t, 5*time.Second, func() bool {
+		entries, err := client.Do("ACL", "LOG", "10")
+		return err == nil && strings.Contains(fmt.Sprint(entries), "hgetall")
+	}) {
+		t.Fatal("reconnected watcher did not attempt the denied snapshot")
 	}
 	if _, err := client.Do("ACL", "SETUSER", "default", "+hgetall"); err != nil {
 		t.Fatal(err)
