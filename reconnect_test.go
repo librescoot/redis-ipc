@@ -40,6 +40,50 @@ func reconnectRedis(t *testing.T) int {
 	return port
 }
 
+func TestReconnectRetriesFailedSnapshot(t *testing.T) {
+	port := reconnectRedis(t)
+	client, err := New(WithAddress("127.0.0.1"), WithPort(port))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if err := client.HSet("retry:test", "state", "old"); err != nil {
+		t.Fatal(err)
+	}
+	updated := make(chan string, 10)
+	w := client.NewHashWatcher("retry:test")
+	w.OnField("state", func(value string) error { updated <- value; return nil })
+	if err := w.StartWithSync(); err != nil {
+		t.Fatal(err)
+	}
+	defer w.Stop()
+	<-updated
+	if err := client.HSet("retry:test", "state", "new"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do("ACL", "SETUSER", "default", "-hgetall"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.Do("CLIENT", "KILL", "TYPE", "pubsub"); err != nil {
+		t.Fatal(err)
+	}
+	// Wait until the subscription is restored while the snapshot is denied.
+	if !waitFor(t, 5*time.Second, func() bool { return pubsubConnCount(t, client) == 1 }) {
+		t.Fatal("subscription did not reconnect")
+	}
+	if _, err := client.Do("ACL", "SETUSER", "default", "+hgetall"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case value := <-updated:
+		if value != "new" {
+			t.Fatalf("resynced %q, want new", value)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("snapshot was not retried")
+	}
+}
+
 func TestHashWatchersResyncAfterPubsubReconnect(t *testing.T) {
 	port := reconnectRedis(t)
 	client, err := New(WithAddress("127.0.0.1"), WithPort(port))
